@@ -57,6 +57,9 @@ class SimulationResult(BaseModel):
     critical_flags: List[str]
     ai_explanation: Optional[str] = None
     ai_recommendation: Optional[str] = None
+    financial_analysis: Optional[str] = None
+    risk_analysis: Optional[str] = None
+    architect_recommendation: Optional[str] = None
 
 class TwinStats(BaseModel):
     total_components: int

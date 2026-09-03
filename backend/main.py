@@ -46,6 +46,30 @@ def get_stats(db: Session = Depends(get_db)):
 def get_dependencies(db: Session = Depends(get_db)):
     return db.query(models.Dependency).all()
 
+@app.get("/api/twin/health/{component_id}")
+def get_health(component_id: str, db: Session = Depends(get_db)):
+    comp = db.query(models.Component).filter(models.Component.id == component_id).first()
+    if not comp:
+        raise HTTPException(status_code=404, detail="Component not found")
+    
+    try:
+        import cloudwatch_service
+        return cloudwatch_service.get_resource_health(comp)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+@app.get("/api/twin/compliance/{component_id}")
+def get_compliance(component_id: str, db: Session = Depends(get_db)):
+    comp = db.query(models.Component).filter(models.Component.id == component_id).first()
+    if not comp:
+        raise HTTPException(status_code=404, detail="Component not found")
+    
+    try:
+        import config_rules_service
+        return config_rules_service.get_resource_compliance(comp)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
 @app.post("/api/simulate", response_model=schemas.SimulationResult)
 def simulate(request: schemas.SimulationRequest, db: Session = Depends(get_db)):
     try:

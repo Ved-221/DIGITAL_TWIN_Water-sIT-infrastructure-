@@ -73,19 +73,33 @@ def simulate_change(db: Session, target_component_id: str, change_action: str, d
     risk_score += min(high_critical_affected * 10, 40)
     risk_score += min(cross_env_risks * 15, 20)
     
-    # Downtime estimation (simple heuristic)
-    downtime_min = 0
+    # Downtime estimation (dynamic heuristic based on dependencies)
+    base_downtime = 30
     if target_node["type"] in ["database", "storage"]:
-        downtime_min = 120
+        base_downtime = 120
     elif target_node["type"] in ["network", "identity"]:
-        downtime_min = 60
-    else:
-        downtime_min = 30
+        base_downtime = 60
+    
+    # Add 15 mins for every dependency that needs reconfiguration
+    downtime_min = base_downtime + (len(affected_components) * 15)
         
     # Cost delta estimation
     cost_delta = 0
+    base_cost = target_node.get("cost_per_month", 0)
+    
+    # Fallback dynamic cost if Cost Explorer is pending/returns 0
+    if not base_cost or base_cost == 0:
+        if target_node["type"] in ["database", "storage"]:
+            base_cost = 850.0
+        elif target_node["type"] == "server":
+            base_cost = 250.0
+        elif target_node["type"] == "application":
+            base_cost = 500.0
+        else:
+            base_cost = 100.0
+            
     if change_action == "migrate" and destination_env == "cloud":
-        cost_delta = (target_node["cost_per_month"] * 0.15) # 15% increase for cloud migration lift-and-shift heuristic
+        cost_delta = (base_cost * 0.15) # 15% increase for cloud migration lift-and-shift heuristic
 
     # SPOF Check (Very basic: if target is critical and has no siblings of same type)
     # Skipped for brevity, but could check degree.
@@ -111,9 +125,10 @@ def simulate_change(db: Session, target_component_id: str, change_action: str, d
         "critical_flags": critical_flags
     }
     
-    import ai_engine
-    explanation, recommendation = ai_engine.generate_explanation(result)
-    result["ai_explanation"] = explanation
-    result["ai_recommendation"] = recommendation
+    import multi_agent_system
+    agent_reports = multi_agent_system.run_multi_agent_analysis(result)
+    result["financial_analysis"] = agent_reports.get("financial", "Financial Analysis unavailable.")
+    result["risk_analysis"] = agent_reports.get("risk", "Risk Analysis unavailable.")
+    result["architect_recommendation"] = agent_reports.get("architect", "Recommendation unavailable.")
     
     return result
