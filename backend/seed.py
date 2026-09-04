@@ -3,7 +3,7 @@ import database, models
 import uuid
 
 def seed_data(db: Session):
-    if db.query(models.Component).filter(models.Component.source_environment == "manual_waters").count() > 0:
+    if db.query(models.Component).count() > 0:
         return
 
     # Seed Environment record

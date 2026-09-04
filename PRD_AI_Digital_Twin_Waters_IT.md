@@ -125,10 +125,11 @@ We are building **"InfraTwin"** *(placeholder name — rename freely)*: an AI-po
 1. **Models** an organization's IT infrastructure as an interactive dependency graph (apps, servers, databases, networks, cloud resources, identity, storage).
 2. **Simulates** proposed changes (cloud migration, Kubernetes repositioning, server/node failure, network link failure, capacity changes) against that graph **before** they happen in the real world.
 3. **Calculates** blast radius, risk score, estimated downtime, and cost impact using a rule-based/graph-algorithmic simulation engine (source of truth — not the LLM).
-4. **Explains** results in plain English using an LLM that is *grounded* in the twin's actual data (retrieval-augmented, not hallucinated).
-5. **Recommends** the safest/most cost-effective path forward (e.g., "migrate authentication connectivity first, then the app") and lets leaders compare multiple scenarios side-by-side.
+4. **Explains** results in plain English using a **Multi-Agent System (Financial Analyst, Risk Assessor, Cloud Architect)** that is *grounded* in the twin's actual data.
+5. **Prescribes** the safest/most cost-effective path forward through the Cloud Architect agent acting as an **Optimization Engine** (e.g., suggesting specific architectural changes like adding load balancers or decoupling dependencies to drive risk down to zero).
+6. **Environment Isolation**: Supports dynamic isolated sandbox environments (e.g. `aws_sim_{uuid}`) allowing users to prototype prescriptive architectural changes safely before deploying to the primary AWS production graph.
 
-**Design principle (critical for judges):** `Digital Twin → Simulation Engine → AI Explanation`, never `LLM → invents an architecture → calls it a digital twin`. The structured graph and simulation engine are ground truth; AI sits on top to make it usable via natural language.
+**Design principle (critical for judges):** `Digital Twin → Simulation Engine → Multi-Agent AI Synthesis`, never `LLM → invents an architecture → calls it a digital twin`. The structured graph and simulation engine are ground truth; the MAS sits on top to evaluate and recommend prescriptive steps.
 
 ---
 
@@ -153,12 +154,12 @@ Building all 25 possible features is out of scope for a hackathon. Scope is spli
 2. **Dependency Graph & Mapping** — every component stores its dependencies and reverse-dependencies (what depends on it).
 3. **What-If Simulation Engine** — propose a change (e.g., "migrate App A to cloud"), engine traverses the graph and returns affected components.
 4. **Blast Radius Analysis** — visually highlight affected components by severity (🔴 critical / 🟠 high / 🟡 moderate / 🟢 none).
-5. **AI Impact Explanation** — LLM turns the simulation's structured output into a plain-English explanation grounded in twin data (not free-form generation).
+5. **Multi-Agent AI Impact Explanation** — A team of 3 specialized agents (Finance, Risk, Architect) turns the simulation's structured output into executive summaries.
+6. **Prescriptive Optimization Engine** — The Lead Architect agent outputs structured JSON with concrete, step-by-step architectural recommendations (e.g. "Add a Load Balancer in front of X").
+7. **Isolated Sandbox Environments** — Dynamic `aws_sim_uuid` workspaces allowing users to test those prescriptive changes independently from the main AWS production environment.
 
 ### 🥈 Tier 2 — High-Impact, Build If Time Allows
-6. **Migration Simulator (wizard)** — select workload → select destination (on-prem/AWS/Azure/K8s) → get risk score, estimated downtime, cost delta, and a recommendation.
-7. **Risk + Cost Prediction** — a computed Change Risk Score (criticality + dependency count + security impact + downtime probability + complexity + cost) and a cost comparison (current vs proposed).
-8. **AI Recommendation Engine** — compares 2–3 options (do nothing / migrate directly / phased migration) with a reasoned recommendation.
+8. **Risk + Cost Prediction** — a computed Change Risk Score (criticality + dependency count + security impact + downtime probability + complexity + cost) and a cost comparison (current vs proposed).
 9. **"What If?" Natural-Language Interface** — a chat box where a leader types a question in plain English; it's converted into a graph query + simulation, and the answer is explained in natural language.
 10. **Single Point of Failure (SPOF) Detection** — automatically scans the graph for components with no redundancy and flags them.
 
@@ -186,15 +187,15 @@ Building all 25 possible features is out of scope for a hackathon. Scope is spli
       b. Traverses the dependency graph (forward + reverse dependencies)
       c. Applies rule-based impact logic (network, security, cost, downtime heuristics)
       d. Computes: affected components, risk score, estimated downtime, cost delta
-5. AI Layer:
-      a. Receives the structured simulation result (never raw infra secrets, never free invention)
-      b. Generates a plain-English explanation + recommendation
+5. Multi-Agent AI Layer:
+      a. Receives the structured simulation result (never raw infra secrets).
+      b. Financial Analyst evaluates cost heuristics; Risk Assessor evaluates downtime/blast radius.
+      c. Lead Architect synthesizes these into a prescriptive JSON plan.
 6. UI renders:
-      - Before/After graph state
-      - Blast radius heat-map (🔴🟠🟡🟢)
+      - Before/After graph state in isolated Sandbox environments
+      - Agent Summary (Financial, Risk, and Architect consensus badges)
       - Risk/Cost/Downtime scorecard
-      - AI explanation + "Why?" drill-down
-      - Recommended migration strategy
+      - Architect's Recommendation (AI explanation + bulleted Recommended Actions)
 ```
 
 ### 8.1 Example Demo Script (for judges)
@@ -244,7 +245,8 @@ Building all 25 possible features is out of scope for a hackathon. Scope is spli
 | risk_score | int (0–100) | computed |
 | estimated_downtime_min | int | computed |
 | cost_delta_monthly | numeric | computed |
-| ai_explanation | text | LLM output, stored for audit/history |
+| architect_recommendation | text | MAS synthesized explanation |
+| recommended_actions | JSON array | MAS prescribed step-by-step changes |
 | created_at | timestamp | |
 
 **`users`** — standard auth table (id, name, email, role).
@@ -264,14 +266,18 @@ Building all 25 possible features is out of scope for a hackathon. Scope is spli
 ### 9.3 Example Simulation Result JSON
 ```json
 {
-  "change": "Migrate Application A (Empower) from on-prem to AWS",
-  "affected_components": 7,
+  "change_action": "migrate",
+  "target_component": "Empower",
+  "affected_count": 7,
   "risk_score": 78,
   "risk_level": "HIGH",
   "estimated_downtime_minutes": 42,
   "cost_delta_monthly": 2100,
-  "critical_dependency": "Authentication Service remains on-prem — cross-environment dependency",
-  "recommendation": "Migrate authentication connectivity first, validate network access, then migrate the application."
+  "architect_recommendation": "The proposed migration poses a high risk of disruption...",
+  "recommended_actions": [
+    "Implement a data replication strategy to minimize downtime",
+    "Deploy a redundant network architecture to isolate dependencies"
+  ]
 }
 ```
 
@@ -317,7 +323,7 @@ Kept intentionally lean — practical for a hackathon timeline, not "30 technolo
 | Primary database | **PostgreSQL** | Stores components, dependencies, simulation results, metrics |
 | Graph algorithms | **NetworkX** (Python) | Dependency traversal, blast radius, SPOF detection — no need for a separate graph DB at MVP scale |
 | Vector DB / RAG (optional) | **pgvector** on Postgres | If doing RAG over Waters public docs — avoids adding a new DB |
-| AI / LLM | OpenAI API / Claude API / Gemini API (pick one) | Explanation + recommendation layer, grounded in simulation output |
+| AI / LLM | **OpenRouter (Llama 3.1) / Groq / OpenAI** | Multi-Agent System logic (Financial Analyst, Risk Assessor, Cloud Architect) relying on structured JSON outputs |
 | RAG framework (optional) | LangChain or LlamaIndex | If building the knowledge-base/RAG feature |
 | Vision (stretch) | Vision-capable LLM + OCR | For "upload architecture diagram → auto-generate twin" feature |
 | Auth | Supabase Auth (or Clerk/Auth0) | Don't build auth from scratch |
@@ -404,13 +410,12 @@ Assuming a typical hackathon timeline (adjust hours to your actual schedule — 
 
 **Deliverable:** You can pick a component, propose a change, and get a structured impact result.
 
-### Phase 3 — Blast Radius + AI Explanation Layer (Hours 26–36)
-- Implement Blast Radius visualization: color-code affected nodes (🔴🟠🟡🟢) directly on the React Flow graph.
-- Integrate LLM API: feed the structured simulation JSON into a prompt template that produces a grounded, plain-English explanation (never let the LLM invent infra facts — always pass it the actual simulation output as context).
-- Implement the "Why?" drill-down and AI Recommendation Engine (compare 2–3 options with reasoning).
-- Build the Natural-Language "What If?" chat interface (`/api/chat`) — parses user intent into a structured simulation call.
-
-**Deliverable:** The full "propose → simulate → visualize → explain → recommend" loop works end-to-end. This is your core demo.
+### Phase 3 — Multi-Agent AI & Sandboxing (Completed)
+- **Status:** **✅ DONE**
+- Implemented robust `run_multi_agent_analysis` triggering 3 distinct agents.
+- Architect engine outputs strict JSON with prescriptive topology edits (`recommended_actions`).
+- Built isolated sandbox environments (`aws_sim_uuid`) to safely apply the Architect's recommendations without corrupting production.
+- Streamlined UI (Node Details panel redesign, Agent Summary card, dynamic JSON parsing).
 
 ### Phase 4 — Executive Dashboard + Polish (Hours 36–46)
 - Build the Executive Dashboard: overall infra health %, critical services count, high-risk components count, current infra cost, migration opportunity estimate, SPOF count.
