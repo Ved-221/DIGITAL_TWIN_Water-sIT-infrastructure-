@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 
 const API_BASE = 'http://localhost:8000/api';
 
@@ -54,7 +54,7 @@ export default function ResourceFormModal({ isOpen, onClose, onSave, existingRes
     const method = existingResource ? 'PUT' : 'POST';
     const url = existingResource ? `${API_BASE}/manual/components/${existingResource.id}` : `${API_BASE}/manual/components`;
     
-    const payload = { ...formData };
+    const payload: any = { ...formData };
     if (payload.cpu === '') payload.cpu = null;
     if (payload.memory === '') payload.memory = null;
 

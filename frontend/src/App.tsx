@@ -1,13 +1,11 @@
 import { useEffect, useState, useCallback } from 'react';
 import {
   ReactFlow,
-  MiniMap,
   Controls,
   Background,
   BackgroundVariant,
   useNodesState,
   useEdgesState,
-  addEdge,
   MarkerType,
   Handle,
   Position,
@@ -16,7 +14,7 @@ import {
 import type { Node, Edge, Connection } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import classNames from 'classnames';
-import { AlertTriangle, Clock, DollarSign, Activity, LayoutDashboard, Share2, Server, Cloud, HeartPulse, Monitor, Database, Network, HardDrive, Key, Plug, Box, Shield, ShieldAlert, ShieldCheck, Plus, Trash2, Edit, Save, ArrowLeft, RefreshCw, X, Link as LinkIcon, Info, Wrench } from 'lucide-react';
+import { AlertTriangle, DollarSign, Activity, LayoutDashboard, Share2, Server, Cloud, Monitor, Database, Network, HardDrive, Key, Plug, Box, Plus, Trash2, ArrowLeft, RefreshCw, X, Link as LinkIcon, Info, Wrench, CheckCircle2, Sparkles, Cpu, Layers, ShieldCheck, ArrowRight } from 'lucide-react';
 import ResourceFormModal from './components/ResourceFormModal';
 import DependencyFormModal from './components/DependencyFormModal';
 
@@ -37,12 +35,6 @@ const CustomNode = ({ data, selected }: any) => {
   const isBlastRadius = data.blastRadius;
   const IconComponent = iconMap[data.type] || Box;
   const isPlanned = data.owner === 'Planned Deployment';
-  
-  const envColor = data.environment === 'cloud' || data.environment === 'cloud_resource' 
-    ? 'text-green-400' 
-    : data.environment === 'on_prem' 
-      ? 'text-yellow-400' 
-      : 'text-slate-400';
 
   return (
     <div className={classNames(
@@ -90,7 +82,6 @@ export default function App() {
   const [view, setView] = useState<'graph' | 'dashboard'>('graph');
   
   const [projects, setProjects] = useState<any[]>([]);
-  const [currentProjectName, setCurrentProjectName] = useState<string>('');
 
   const [stats, setStats] = useState<any>(null);
   const [rawComponents, setRawComponents] = useState<any[]>([]);
@@ -102,11 +93,16 @@ export default function App() {
   const [selectedNode, setSelectedNode] = useState<any>(null);
   const [simResult, setSimResult] = useState<any>(null);
   const [simulating, setSimulating] = useState(false);
+  const [showSolutions, setShowSolutions] = useState<boolean | null>(null);
+  const [applyingSolution, setApplyingSolution] = useState<string | null>(null);
+  const [appliedComparison, setAppliedComparison] = useState<any>(null);
+  const [acceptanceStatus, setAcceptanceStatus] = useState<string | null>(null);
+  const [processingDecision, setProcessingDecision] = useState<boolean>(false);
 
+  const [currentProjectName, setCurrentProjectName] = useState<string>('');
   const [healthData, setHealthData] = useState<any>(null);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthError, setHealthError] = useState(false);
-
   const [complianceData, setComplianceData] = useState<any>(null);
   const [complianceLoading, setComplianceLoading] = useState(false);
 
@@ -201,8 +197,8 @@ export default function App() {
         id: c.id,
         type: 'custom',
         position: { 
-          x: (i % 4) * 280 + 50, 
-          y: Math.floor(i / 4) * 150 + 50 
+          x: (c.position_x !== null && c.position_x !== undefined && c.position_x !== 0) ? c.position_x : (i % 4) * 280 + 50, 
+          y: (c.position_y !== null && c.position_y !== undefined && c.position_y !== 0) ? c.position_y : Math.floor(i / 4) * 150 + 50 
         },
         data: { ...c, blastRadius: false }
       }));
@@ -247,6 +243,42 @@ export default function App() {
     }
   }, [selectedEnv, selectedNode, setNodes, setEdges, projects]);
 
+  const onNodeDragStop = useCallback((_: any, node: Node) => {
+    fetch(`${API_BASE}/twin/components/${node.id}/position`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        position_x: node.position.x,
+        position_y: node.position.y
+      })
+    }).catch(err => console.error("Failed to persist node position:", err));
+  }, []);
+
+  const onEdgeClick = useCallback(async (_: any, edge: Edge) => {
+    if (selectedEnv?.startsWith('aws')) return;
+    if (window.confirm(`Delete connection '${edge.label || 'dependency'}'?`)) {
+      try {
+        await fetch(`${API_BASE}/manual/dependencies/${edge.id}`, { method: 'DELETE' });
+        fetchData();
+      } catch (err) {
+        console.error("Failed to delete dependency:", err);
+      }
+    }
+  }, [selectedEnv, fetchData]);
+
+  const handleClearEnvironment = async () => {
+    if (selectedEnv?.startsWith('aws')) return;
+    if (!window.confirm("Clear all resources and connections in this canvas?")) return;
+    try {
+      for (const n of nodes) {
+        await fetch(`${API_BASE}/manual/components/${n.id}`, { method: 'DELETE' });
+      }
+      fetchData();
+    } catch (err) {
+      console.error("Failed to clear environment:", err);
+    }
+  };
+
   useEffect(() => {
     fetchData();
   }, [selectedEnv]);
@@ -255,6 +287,8 @@ export default function App() {
     const data = node.data;
     setSelectedNode(data);
     setSimResult(null);
+    setShowSolutions(null);
+    setAppliedComparison(null);
     setHealthData(null);
     setHealthError(false);
     setComplianceData(null);
@@ -303,34 +337,154 @@ export default function App() {
   const handleSimulate = async (useAi: boolean = false) => {
     if (!selectedNode) return;
     setSimulating(true);
+    setShowSolutions(null);
+    setAppliedComparison(null);
     
     try {
+      const activeEnv = selectedEnv || selectedNode.source_environment || "aws";
       const res = await fetch(`${API_BASE}/simulate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           target_component_id: selectedNode.id,
+          component_id: selectedNode.id,
           action: "migrate",
           destination_env: "cloud",
+          source_environment: activeEnv,
           use_ai: useAi
         })
       });
       
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        console.error("Simulation failed:", errJson);
+        alert(`Simulation could not be completed: ${errJson.detail || 'Server error'}`);
+        return;
+      }
+      
       const data = await res.json();
       setSimResult(data);
+      
+      const rawAffected = data.affected_components || data.blast_radius_nodes || [];
+      const affectedIds = new Set<string>(
+        rawAffected.map((c: any) => (typeof c === 'string' ? c : c?.id || c?.component_id))
+      );
       
       setNodes(nds => nds.map(n => ({
         ...n,
         data: {
           ...n.data,
-          blastRadius: data.affected_components.includes(n.id)
+          blastRadius: affectedIds.has(n.id)
         }
       })));
       
     } catch (err) {
-      console.error(err);
+      console.error("Simulation error:", err);
+      alert("Simulation request encountered an unexpected network error.");
     } finally {
       setSimulating(false);
+    }
+  };
+
+  const handleApplySolution = async (sol: any) => {
+    if (!selectedNode) return;
+    setApplyingSolution(sol.name || sol.id);
+    try {
+      const activeEnv = selectedEnv || selectedNode.source_environment || "aws";
+      const payload = {
+        source_environment: activeEnv,
+        target_component_id: selectedNode.id,
+        solution_id: sol.id || `sol-${sol.strategy_type || 'custom'}`,
+        solution_name: sol.name,
+        strategy_type: sol.strategy_type,
+        solution: sol,
+        action: simResult?.action || "migrate"
+      };
+
+      const res = await fetch(`${API_BASE}/solutions/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        alert(`Failed to apply solution: ${errJson.detail || errJson.message || 'Server error'}`);
+        return;
+      }
+
+      const data = await res.json();
+      setAppliedComparison(data);
+      setAcceptanceStatus(null);
+      
+      // If the solution mutated the active environment directly, refresh graph nodes
+      if (data.target_environment === selectedEnv) {
+        fetchData();
+      }
+    } catch (err) {
+      console.error("Apply solution error:", err);
+      alert("Encountered an error while applying solution.");
+    } finally {
+      setApplyingSolution(null);
+    }
+  };
+
+  const handleAcceptSolution = async () => {
+    if (!appliedComparison) return;
+    setProcessingDecision(true);
+    try {
+      const res = await fetch(`${API_BASE}/solutions/accept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          snapshot_id: appliedComparison.snapshot_id,
+          environment_id: appliedComparison.target_environment || selectedEnv
+        })
+      });
+      if (res.ok) {
+        setAcceptanceStatus('accepted');
+        fetchData();
+      }
+    } catch (err) {
+      console.error("Accept error:", err);
+      alert("Error accepting solution change.");
+    } finally {
+      setProcessingDecision(false);
+    }
+  };
+
+  const handleRollbackSolution = async () => {
+    if (!appliedComparison) return;
+    setProcessingDecision(true);
+    try {
+      const res = await fetch(`${API_BASE}/solutions/rollback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          snapshot_id: appliedComparison.snapshot_id,
+          environment_id: appliedComparison.target_environment || selectedEnv,
+          target_component_id: selectedNode?.id,
+          action: simResult?.action || "migrate"
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAcceptanceStatus('rolled_back');
+        setAppliedComparison(null);
+        if (data.baseline_simulation) {
+          setSimResult(data.baseline_simulation);
+        }
+        setShowSolutions(true);
+        fetchData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`Rollback failed: ${err.detail || 'Server error'}`);
+      }
+    } catch (err) {
+      console.error("Rollback error:", err);
+      alert("Error rolling back changes.");
+    } finally {
+      setProcessingDecision(false);
     }
   };
 
@@ -521,7 +675,8 @@ export default function App() {
             onClick={() => setSelectedEnv(selectedEnv?.startsWith('aws') ? 'aws_menu' : 'manual_menu')}
           >
             <div className="w-2 h-2 rounded-full bg-teal-400"></div>
-            {selectedEnv?.startsWith('aws') ? 'AWS ENVIRONMENT' : 'MANUAL ENVIRONMENT'} 
+            {selectedEnv?.startsWith('aws') ? 'AWS ENVIRONMENT' : 'MANUAL ENVIRONMENT'}
+            {currentProjectName && <span className="text-white font-bold ml-1">({currentProjectName})</span>}
             <span className="text-teal-200/50 mx-1">•</span> 
             {selectedEnv === 'aws' ? 'Live Region' : selectedEnv?.startsWith('aws_sim_') ? 'Simulation Sandbox' : 'Custom Infrastructure'}
             <span className="text-teal-200/50 mx-1">•</span> 
@@ -560,7 +715,7 @@ export default function App() {
             </button>
           )}
           
-          <button className="flex items-center gap-2 bg-transparent border border-slate-700 hover:bg-slate-800 px-3 py-1.5 rounded text-sm font-medium text-slate-300 transition">
+          <button onClick={handleClearEnvironment} disabled={selectedEnv?.startsWith('aws')} className="flex items-center gap-2 bg-transparent border border-slate-700 hover:bg-slate-800 disabled:opacity-50 px-3 py-1.5 rounded text-sm font-medium text-slate-300 transition">
             <Trash2 size={14} /> Clear
           </button>
           
@@ -648,6 +803,8 @@ export default function App() {
                   onEdgesChange={onEdgesChange}
                   onConnect={onConnect}
                   onNodeClick={onNodeClick}
+                  onEdgeClick={onEdgeClick}
+                  onNodeDragStop={onNodeDragStop}
                   nodeTypes={nodeTypes}
                   fitView
                   className="bg-[#0f172a]"
@@ -698,11 +855,20 @@ export default function App() {
                         <span className="text-sm font-bold text-white">Financial Analyst</span>
                       </div>
                       <div className="flex flex-col gap-1 pl-8">
-                         <span className={classNames("text-xs font-bold", simResult.cost_delta_monthly <= 0 ? 'text-emerald-400' : 'text-yellow-400')}>
-                           {simResult.cost_delta_monthly <= 0 ? '✓ Favorable' : '⚠ Caution'}
+                         <span className={classNames(
+                           "text-xs font-bold", 
+                           simResult.financial_summary?.status === 'Favorable' || (simResult.cost_delta_monthly !== null && simResult.cost_delta_monthly <= 0)
+                             ? 'text-emerald-400' 
+                             : 'text-yellow-400'
+                         )}>
+                           {simResult.financial_summary?.status === 'Favorable' || (simResult.cost_delta_monthly !== null && simResult.cost_delta_monthly <= 0)
+                             ? '✓ Favorable' 
+                             : '⚠ Caution'}
                          </span>
                          <span className="text-xs text-slate-400 leading-tight">
-                           {simResult.cost_delta_monthly <= 0 ? 'Cost impact is low' : 'Increases monthly run rate'}
+                           {simResult.financial_summary?.summary || (simResult.cost_delta_monthly !== null 
+                             ? (simResult.cost_delta_monthly <= 0 ? 'Cost impact is favorable' : `Increases monthly run rate (+${simResult.currency === 'INR' ? '₹' : '$'}${simResult.cost_delta_monthly}/mo)`) 
+                             : 'Pricing data unavailable')}
                          </span>
                       </div>
                     </div>
@@ -714,11 +880,24 @@ export default function App() {
                         <span className="text-sm font-bold text-white">Risk Analyst</span>
                       </div>
                       <div className="flex flex-col gap-1 pl-8">
-                         <span className={classNames("text-xs font-bold", simResult.risk_level === 'High' ? 'text-red-400' : simResult.risk_level === 'Medium' ? 'text-yellow-400' : 'text-emerald-400')}>
-                           {simResult.risk_level === 'High' ? '✕ High Risk' : simResult.risk_level === 'Medium' ? '⚠ Caution' : '✓ Favorable'}
+                         <span className={classNames(
+                           "text-xs font-bold", 
+                           (simResult.risk_summary?.status === 'High Risk' || simResult.risk_level?.toLowerCase() === 'high' || simResult.risk_level?.toLowerCase() === 'critical') 
+                             ? 'text-red-400' 
+                             : (simResult.risk_summary?.status === 'Caution' || simResult.risk_level?.toLowerCase() === 'medium' || simResult.risk_level?.toLowerCase() === 'moderate') 
+                               ? 'text-yellow-400' 
+                               : 'text-emerald-400'
+                         )}>
+                           {(simResult.risk_summary?.status === 'High Risk' || simResult.risk_level?.toLowerCase() === 'high' || simResult.risk_level?.toLowerCase() === 'critical') 
+                             ? '✕ High Risk' 
+                             : (simResult.risk_summary?.status === 'Caution' || simResult.risk_level?.toLowerCase() === 'medium' || simResult.risk_level?.toLowerCase() === 'moderate') 
+                               ? '⚠ Caution' 
+                               : '✓ Favorable'}
                          </span>
                          <span className="text-xs text-slate-400 leading-tight">
-                           {simResult.estimated_downtime_minutes} min downtime
+                           {simResult.risk_summary?.summary || (simResult.estimated_downtime_minutes !== null 
+                             ? `${simResult.estimated_downtime_minutes} min downtime` 
+                             : 'Downtime metrics pending')}
                          </span>
                       </div>
                     </div>
@@ -730,11 +909,28 @@ export default function App() {
                         <span className="text-sm font-bold text-white">AI Cloud Architect</span>
                       </div>
                       <div className="flex flex-col gap-1 pl-8">
-                         <span className={classNames("text-xs font-bold", simResult.risk_level === 'High' || simResult.risk_score > 70 ? 'text-red-400' : simResult.risk_level === 'Medium' ? 'text-yellow-400' : 'text-emerald-400')}>
-                           {simResult.risk_level === 'High' || simResult.risk_score > 70 ? '✕ Blocked' : simResult.risk_level === 'Medium' ? '⚠ Conditional' : '✓ Approved'}
+                         <span className={classNames(
+                           "text-xs font-bold", 
+                           (simResult.architect_summary?.status === 'Blocked' || simResult.risk_level?.toLowerCase() === 'high' || simResult.risk_level?.toLowerCase() === 'critical') 
+                             ? 'text-red-400' 
+                             : (simResult.architect_summary?.status === 'Conditional' || simResult.risk_level?.toLowerCase() === 'medium' || simResult.risk_level?.toLowerCase() === 'moderate') 
+                               ? 'text-yellow-400' 
+                               : 'text-emerald-400'
+                         )}>
+                           {simResult.architect_summary?.status 
+                             ? (simResult.architect_summary.status === 'Blocked' ? '✕ Blocked' : simResult.architect_summary.status === 'Conditional' ? '⚠ Conditional' : '✓ Approved')
+                             : ((simResult.risk_level?.toLowerCase() === 'high' || simResult.risk_level?.toLowerCase() === 'critical') 
+                                 ? '✕ Blocked' 
+                                 : (simResult.risk_level?.toLowerCase() === 'medium' || simResult.risk_level?.toLowerCase() === 'moderate') 
+                                   ? '⚠ Conditional' 
+                                   : '✓ Approved')}
                          </span>
                          <span className="text-xs text-slate-400 leading-tight">
-                           {simResult.risk_level === 'High' || simResult.risk_score > 70 ? 'Migration not recommended' : simResult.risk_level === 'Medium' ? 'Phased migration' : 'Ready for migration'}
+                           {simResult.architect_summary?.summary || ((simResult.risk_level?.toLowerCase() === 'high' || simResult.risk_level?.toLowerCase() === 'critical') 
+                             ? 'Remediation recommended prior to change' 
+                             : (simResult.risk_level?.toLowerCase() === 'medium' || simResult.risk_level?.toLowerCase() === 'moderate') 
+                               ? 'Phased execution recommended' 
+                               : 'Ready for operational execution')}
                          </span>
                       </div>
                     </div>
@@ -786,6 +982,30 @@ export default function App() {
                       Region: {selectedNode?.location}
                     </span>
                   </div>
+
+                  {/* CloudWatch Telemetry & Config Rules */}
+                  {selectedEnv?.startsWith('aws') && (
+                    <div className="mb-4 bg-slate-900/70 border border-slate-800 p-3 rounded-lg space-y-1.5 text-xs">
+                      <div className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Live Cloud Telemetry</div>
+                      {healthLoading && <div className="text-slate-400 animate-pulse">Loading CloudWatch health...</div>}
+                      {healthData && (
+                        <div className="flex justify-between text-slate-300">
+                          <span>Health:</span>
+                          <span className="text-emerald-400 font-bold">{healthData.status || 'ACTIVE'}</span>
+                        </div>
+                      )}
+                      {healthError && <div className="text-amber-400">CloudWatch telemetry unavailable</div>}
+                      {complianceLoading && <div className="text-slate-400 animate-pulse">Evaluating Config rules...</div>}
+                      {complianceData && (
+                        <div className="flex justify-between text-slate-300">
+                          <span>Compliance:</span>
+                          <span className={complianceData.status === 'COMPLIANT' ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                            {complianceData.status || 'COMPLIANT'}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {!selectedEnv?.startsWith('aws') && (
                     <div className="flex gap-3 pt-2">
@@ -876,24 +1096,34 @@ export default function App() {
                       <div className="bg-[#0f172a]/80 border border-slate-700 p-5 rounded-lg">
                         <h3 className={classNames(
                           "text-lg font-bold mb-4 uppercase tracking-wider",
-                          (simResult.risk_level === 'High' || simResult.risk_score > 70) ? 'text-red-400' : simResult.risk_level === 'Medium' ? 'text-yellow-400' : 'text-emerald-400'
+                          (simResult.risk_level?.toLowerCase() === 'high' || simResult.risk_level?.toLowerCase() === 'critical' || simResult.risk_score >= 70) 
+                            ? 'text-red-400' 
+                            : (simResult.risk_level?.toLowerCase() === 'medium' || simResult.risk_level?.toLowerCase() === 'moderate') 
+                              ? 'text-yellow-400' 
+                              : 'text-emerald-400'
                         )}>
-                          {(simResult.risk_level === 'High' || simResult.risk_score > 70) ? 'MIGRATION BLOCKED' : simResult.risk_level === 'Medium' ? 'CONDITIONAL APPROVAL' : 'APPROVAL GRANTED'}
+                          {(simResult.risk_level?.toLowerCase() === 'high' || simResult.risk_level?.toLowerCase() === 'critical' || simResult.risk_score >= 70) 
+                            ? 'MIGRATION BLOCKED' 
+                            : (simResult.risk_level?.toLowerCase() === 'medium' || simResult.risk_level?.toLowerCase() === 'moderate') 
+                              ? 'CONDITIONAL APPROVAL' 
+                              : 'APPROVAL GRANTED'}
                         </h3>
                         
                         <div className="grid grid-cols-2 gap-4">
                           <div>
                             <div className="text-[10px] text-slate-500 uppercase font-bold mb-1 tracking-wider">Key Metrics</div>
                             <div className="text-xs text-slate-300 space-y-1">
-                              <div>Cost: ${selectedNode.cost_per_month} <span className={simResult.cost_delta_monthly > 0 ? "text-yellow-400" : "text-emerald-400"}>{simResult.cost_delta_monthly > 0 ? '+' : ''}${simResult.cost_delta_monthly}</span></div>
-                              <div>Downtime: {simResult.estimated_downtime_minutes}m</div>
+                              <div>Cost: ${selectedNode?.cost_per_month ?? 0} <span className={(simResult.cost_delta_monthly ?? 0) > 0 ? "text-yellow-400" : "text-emerald-400"}>{(simResult.cost_delta_monthly ?? 0) > 0 ? '+' : ''}${simResult.cost_delta_monthly ?? 0}</span></div>
+                              <div>Downtime: {simResult.estimated_downtime_minutes ?? 0}m</div>
                             </div>
                           </div>
                           <div>
                             <div className="text-[10px] text-slate-500 uppercase font-bold mb-1 tracking-wider">Risk Overview</div>
                             <div className="text-xs text-slate-300">
-                              <span className={simResult.risk_level === 'High' ? 'text-red-400 font-bold' : simResult.risk_level === 'Medium' ? 'text-yellow-400 font-bold' : 'text-emerald-400 font-bold'}>{simResult.risk_level} Risk</span>
-                              <div>{simResult.affected_count} Components</div>
+                              <span className={(simResult.risk_level?.toLowerCase() === 'high' || simResult.risk_level?.toLowerCase() === 'critical' || simResult.risk_score >= 70) ? 'text-red-400 font-bold' : (simResult.risk_level?.toLowerCase() === 'medium' || simResult.risk_level?.toLowerCase() === 'moderate') ? 'text-yellow-400 font-bold' : 'text-emerald-400 font-bold'}>
+                                {simResult.risk_level || 'LOW'} Risk
+                              </span>
+                              <div>{simResult.affected_count ?? 0} Components</div>
                             </div>
                           </div>
                         </div>
@@ -939,6 +1169,402 @@ export default function App() {
                           )}
                         </ul>
                       </div>
+
+                      {/* 4. FEASIBLE SOLUTIONS PROMPT & CARDS (ML-POWERED) */}
+                      {showSolutions === null && !appliedComparison && (
+                        <div className="bg-gradient-to-r from-purple-950/40 via-indigo-950/30 to-slate-900 border border-purple-500/40 p-5 rounded-lg text-left shadow-lg">
+                          <div className="flex items-start gap-3">
+                            <div className="p-2 bg-purple-500/20 rounded-lg text-purple-300 shrink-0">
+                              <Sparkles size={20} />
+                            </div>
+                            <div className="flex-1">
+                              <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-1">
+                                Would you like to see feasible solutions?
+                              </h4>
+                              <p className="text-xs text-slate-300 leading-relaxed mb-4">
+                                Our trained Supervised ML Suggestion Engine (<span className="text-purple-300 font-semibold">RandomForest Regressor</span>) evaluates and ranks candidate remediation architectures dynamically based on this component's topology and telemetry.
+                              </p>
+                              <div className="flex items-center gap-3">
+                                <button
+                                  onClick={() => setShowSolutions(true)}
+                                  className="bg-purple-600 hover:bg-purple-500 text-white font-semibold text-xs px-4 py-2 rounded flex items-center gap-2 transition shadow-md shadow-purple-900/30"
+                                >
+                                  <Sparkles size={14} />
+                                  YES — View ML Recommendations
+                                </button>
+                                <button
+                                  onClick={() => setShowSolutions(false)}
+                                  className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs px-4 py-2 rounded transition border border-slate-700"
+                                >
+                                  NO (Dismiss)
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ML-Ranked Feasible Solutions List */}
+                      {showSolutions === true && (
+                        <div className="space-y-4">
+                          <div className="flex justify-between items-center">
+                            <div className="flex items-center gap-2">
+                              <span className="bg-purple-900/50 text-purple-300 border border-purple-700/50 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
+                                <Cpu size={12} />
+                                ML-Ranked Feasible Solutions
+                              </span>
+                            </div>
+                            <button 
+                              onClick={() => setShowSolutions(false)}
+                              className="text-[11px] text-slate-400 hover:text-slate-200 underline"
+                            >
+                              Hide Solutions
+                            </button>
+                          </div>
+
+                          {simResult.feasible_solutions && simResult.feasible_solutions.length > 0 ? (
+                            <div className="space-y-3">
+                              {simResult.feasible_solutions.map((sol: any, idx: number) => {
+                                const suitabilityPct = sol.suitability_percentage ?? (sol.predicted_suitability ? Math.round(sol.predicted_suitability * 100) : 75);
+                                const isHighSuitability = suitabilityPct >= 80;
+                                const isMedSuitability = suitabilityPct >= 60;
+                                const isBeingApplied = applyingSolution === sol.name;
+
+                                return (
+                                  <div 
+                                    key={idx}
+                                    className={classNames(
+                                      "bg-[#0f172a]/90 border rounded-lg p-4 text-left transition-all",
+                                      idx === 0 ? "border-purple-500/60 shadow-lg shadow-purple-950/20" : "border-slate-700/70 hover:border-slate-600"
+                                    )}
+                                  >
+                                    <div className="flex justify-between items-start mb-2">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className={classNames(
+                                          "text-[10px] font-extrabold uppercase px-2 py-0.5 rounded tracking-wider",
+                                          idx === 0 ? "bg-purple-600 text-white" : "bg-slate-800 text-slate-400"
+                                        )}>
+                                          Rank #{sol.rank || (idx + 1)}
+                                        </span>
+                                        <span className={classNames(
+                                          "text-[10px] font-bold px-2 py-0.5 rounded border",
+                                          isHighSuitability ? "bg-emerald-950/60 text-emerald-300 border-emerald-700/50" :
+                                          isMedSuitability ? "bg-amber-950/60 text-amber-300 border-amber-700/50" :
+                                          "bg-slate-800 text-slate-300 border-slate-700"
+                                        )}>
+                                          {suitabilityPct}% ML Suitability
+                                        </span>
+                                        <span className="text-[10px] text-slate-400 font-mono">
+                                          {sol.confidence || 'High Confidence'}
+                                        </span>
+                                      </div>
+                                      <span className="text-[10px] text-slate-400 capitalize bg-slate-800/80 px-2 py-0.5 rounded border border-slate-700">
+                                        {sol.complexity || 'Moderate'}
+                                      </span>
+                                    </div>
+
+                                    <h5 className="text-sm font-bold text-white mb-1">{sol.name}</h5>
+                                    <p className="text-xs text-slate-300 mb-3 leading-relaxed">{sol.description}</p>
+
+                                    {/* Driving Features / ML Explanation */}
+                                    {sol.supporting_features && sol.supporting_features.length > 0 && (
+                                      <div className="mb-3">
+                                        <div className="text-[10px] text-slate-400 uppercase font-bold mb-1.5 flex items-center gap-1">
+                                          <Sparkles size={10} className="text-purple-400" /> ML Feature Weights / Drivers
+                                        </div>
+                                        <div className="flex flex-wrap gap-1.5">
+                                          {sol.supporting_features.map((feat: string, fIdx: number) => (
+                                            <span key={fIdx} className="bg-slate-800/90 text-purple-200 border border-purple-900/40 text-[10px] px-2 py-0.5 rounded">
+                                              {feat}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {/* Basis Metrics */}
+                                    <div className="grid grid-cols-2 gap-2 bg-slate-900/60 p-2.5 rounded border border-slate-800 mb-3 text-xs">
+                                      <div>
+                                        <span className="text-[10px] text-slate-400 uppercase block font-semibold">Expected Downtime</span>
+                                        <span className="font-semibold text-slate-200">{sol.estimated_downtime_basis || 'Near Zero (Phased)'}</span>
+                                      </div>
+                                      <div>
+                                        <span className="text-[10px] text-slate-400 uppercase block font-semibold">Cost Impact</span>
+                                        <span className="font-semibold text-slate-200">{sol.cost_impact_basis || 'Moderate'}</span>
+                                      </div>
+                                    </div>
+
+                                    {/* Pros & Cons */}
+                                    <div className="space-y-1.5 mb-4 text-xs">
+                                      {sol.pros && sol.pros.length > 0 && (
+                                        <div>
+                                          <span className="text-[10px] text-emerald-400 font-bold uppercase block mb-0.5">Pros:</span>
+                                          <ul className="text-slate-300 space-y-0.5">
+                                            {sol.pros.map((pro: string, pIdx: number) => (
+                                              <li key={pIdx} className="flex items-start gap-1.5 text-[11px]">
+                                                <span className="text-emerald-400">✓</span> {pro}
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      )}
+                                      {sol.cons && sol.cons.length > 0 && (
+                                        <div className="mt-2">
+                                          <span className="text-[10px] text-amber-400 font-bold uppercase block mb-0.5">Trade-offs:</span>
+                                          <ul className="text-slate-400 space-y-0.5">
+                                            {sol.cons.map((con: string, cIdx: number) => (
+                                              <li key={cIdx} className="flex items-start gap-1.5 text-[11px]">
+                                                <span className="text-amber-400">⚠</span> {con}
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {/* Apply Button */}
+                                    <button
+                                      onClick={() => handleApplySolution(sol)}
+                                      disabled={isBeingApplied}
+                                      className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white font-semibold text-xs py-2 rounded flex items-center justify-center gap-2 transition shadow-sm"
+                                    >
+                                      {isBeingApplied ? (
+                                        <>
+                                          <Activity className="animate-spin" size={14} />
+                                          Applying Strategy to Sandbox Twin...
+                                        </>
+                                      ) : (
+                                        <>
+                                          <ShieldCheck size={14} />
+                                          Apply this Solution to Digital Twin Sandbox
+                                        </>
+                                      )}
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div className="bg-slate-900/60 p-4 rounded text-xs text-slate-400 text-center border border-slate-800">
+                              No additional remediation strategies required for this component.
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* 5. BEFORE VS AFTER COMPARISON PANEL */}
+                      {appliedComparison && (
+                        <div className="bg-gradient-to-b from-slate-900 via-slate-900 to-indigo-950/40 border-2 border-emerald-500/50 p-5 rounded-lg text-left shadow-2xl space-y-4 animate-in fade-in">
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <CheckCircle2 size={18} className="text-emerald-400" />
+                                <h4 className="text-sm font-bold text-white uppercase tracking-wider">
+                                  Remediation Applied to Sandbox Twin
+                                </h4>
+                              </div>
+                              <div className="text-xs text-emerald-300 font-medium mt-0.5">
+                                {appliedComparison.solution_applied || appliedComparison.solution_name}
+                              </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-2">
+                              {appliedComparison.remediation_outcome === 'IMPROVED' && (
+                                <span className="bg-emerald-900/80 text-emerald-200 border border-emerald-500/60 text-[10px] font-bold px-2 py-0.5 rounded uppercase">
+                                  ✓ Remediation Improved
+                                </span>
+                              )}
+                              {appliedComparison.remediation_outcome === 'PARTIALLY_IMPROVED' && (
+                                <span className="bg-amber-900/80 text-amber-200 border border-amber-500/60 text-[10px] font-bold px-2 py-0.5 rounded uppercase">
+                                  ⚠ Partially Improved
+                                </span>
+                              )}
+                              {appliedComparison.remediation_outcome === 'NO_IMPROVEMENT' && (
+                                <span className="bg-slate-800 text-slate-300 border border-slate-600 text-[10px] font-bold px-2 py-0.5 rounded uppercase">
+                                  No Improvement
+                                </span>
+                              )}
+                              {appliedComparison.remediation_outcome === 'WORSE' && (
+                                <span className="bg-red-900/80 text-red-200 border border-red-500/60 text-[10px] font-bold px-2 py-0.5 rounded uppercase">
+                                  ⚠ Risk Increased
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Primary Objective Result */}
+                          {appliedComparison.objective_result && (
+                            <div className="bg-indigo-950/40 border border-indigo-800/40 p-2.5 rounded text-xs text-indigo-200 flex items-center gap-2">
+                              <Sparkles size={14} className="text-indigo-400 shrink-0" />
+                              <span>
+                                <strong>Objective ({appliedComparison.primary_objective?.replace('_', ' ')}):</strong> {appliedComparison.objective_result}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Metric Comparison Cards */}
+                          <div className="grid grid-cols-2 gap-3">
+                            {/* Risk Score */}
+                            <div className="bg-slate-900/90 border border-slate-700 p-3 rounded">
+                              <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">Risk Score</div>
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-sm text-red-400 line-through font-semibold">
+                                  {appliedComparison.before_metrics.risk_score}
+                                </span>
+                                <ArrowRight size={12} className="text-slate-400" />
+                                <span className="text-base text-emerald-400 font-bold">
+                                  {appliedComparison.after_metrics.risk_score}
+                                </span>
+                                <span className="text-[10px] text-emerald-400 font-semibold bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40 ml-auto">
+                                  {appliedComparison.delta?.risk_delta_points ?? appliedComparison.comparison.risk_delta_points} pts
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Downtime */}
+                            <div className="bg-slate-900/90 border border-slate-700 p-3 rounded">
+                              <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">Est. Downtime</div>
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-sm text-yellow-400 line-through font-semibold">
+                                  {appliedComparison.before_metrics.estimated_downtime_minutes}m
+                                </span>
+                                <ArrowRight size={12} className="text-slate-400" />
+                                <span className="text-base text-emerald-400 font-bold">
+                                  {appliedComparison.after_metrics.estimated_downtime_minutes}m
+                                </span>
+                                <span className="text-[10px] text-emerald-400 font-semibold bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40 ml-auto">
+                                  -{appliedComparison.delta?.downtime_saved_minutes ?? appliedComparison.comparison.downtime_saved_minutes}m saved
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Blast Radius */}
+                            <div className="bg-slate-900/90 border border-slate-700 p-3 rounded">
+                              <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">Blast Radius</div>
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-sm text-slate-300 font-semibold">
+                                  {appliedComparison.before_metrics.blast_radius_nodes_count}
+                                </span>
+                                <ArrowRight size={12} className="text-slate-400" />
+                                <span className="text-base text-emerald-400 font-bold">
+                                  {appliedComparison.after_metrics.blast_radius_nodes_count}
+                                </span>
+                                <span className="text-[10px] text-slate-400 ml-auto">
+                                  impacted
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Monthly Cost Delta */}
+                            <div className="bg-slate-900/90 border border-slate-700 p-3 rounded">
+                              <div className="text-[10px] text-slate-400 uppercase font-bold mb-1">Monthly Cost</div>
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-sm text-slate-300 font-semibold">
+                                  ${appliedComparison.before_metrics.monthly_cost}
+                                </span>
+                                <ArrowRight size={12} className="text-slate-400" />
+                                <span className="text-base text-white font-bold">
+                                  ${appliedComparison.after_metrics.monthly_cost}
+                                </span>
+                                <span className="text-[10px] text-yellow-400 font-semibold ml-auto">
+                                  {(appliedComparison.delta?.monthly_cost_delta ?? appliedComparison.comparison.monthly_cost_delta) >= 0 ? '+' : ''}${appliedComparison.delta?.monthly_cost_delta ?? appliedComparison.comparison.monthly_cost_delta}/mo
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* SPOF Resolution Alert */}
+                          {appliedComparison.comparison.spof_eliminated && (
+                            <div className="bg-emerald-950/50 border border-emerald-600/50 p-3 rounded text-xs text-emerald-200 flex items-center gap-2">
+                              <ShieldCheck size={16} className="text-emerald-400 shrink-0" />
+                              <span>
+                                <strong>Single Point of Failure (SPOF) Eliminated:</strong> Redundant routing and active health checks validated.
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Tradeoffs List */}
+                          {appliedComparison.tradeoffs && appliedComparison.tradeoffs.length > 0 && (
+                            <div className="bg-slate-900/80 border border-amber-900/40 p-2.5 rounded text-xs text-amber-200 space-y-1">
+                              <div className="text-[10px] font-bold uppercase tracking-wider text-amber-400">Architectural Trade-offs:</div>
+                              {appliedComparison.tradeoffs.map((tr: string, tIdx: number) => (
+                                <div key={tIdx} className="flex items-start gap-1.5 text-[11px] text-slate-300">
+                                  <span className="text-amber-400">⚠</span> {tr}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Topology Mutations Applied */}
+                          {appliedComparison.mutations_applied && appliedComparison.mutations_applied.length > 0 && (
+                            <div>
+                              <div className="text-[10px] text-slate-400 uppercase font-bold mb-1.5">
+                                Digital Twin Graph Mutations Injected:
+                              </div>
+                              <div className="space-y-1">
+                                {appliedComparison.mutations_applied.map((mut: string, mIdx: number) => (
+                                  <div key={mIdx} className="bg-slate-900/80 border border-slate-800 text-[11px] text-slate-300 px-2.5 py-1 rounded flex items-center gap-2">
+                                    <span className="text-teal-400 font-mono">➜</span>
+                                    {mut}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Acceptance Decision Actions */}
+                          {acceptanceStatus === null ? (
+                            <div className="pt-2 border-t border-slate-800 space-y-2">
+                              <div className="text-xs font-semibold text-slate-200 text-center mb-1">
+                                Do you want to accept this architecture change?
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <button
+                                  onClick={handleAcceptSolution}
+                                  disabled={processingDecision}
+                                  className="bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-800 text-white font-semibold text-xs py-2.5 rounded flex items-center justify-center gap-2 transition shadow-md shadow-emerald-950/40"
+                                >
+                                  {processingDecision ? <Activity className="animate-spin" size={14} /> : <CheckCircle2 size={14} />}
+                                  ACCEPT CHANGE
+                                </button>
+                                <button
+                                  onClick={handleRollbackSolution}
+                                  disabled={processingDecision}
+                                  className="bg-slate-800 hover:bg-red-950 text-slate-200 hover:text-red-200 border border-slate-700 hover:border-red-800 disabled:bg-slate-900 font-semibold text-xs py-2.5 rounded flex items-center justify-center gap-2 transition"
+                                >
+                                  {processingDecision ? <Activity className="animate-spin" size={14} /> : <RefreshCw size={14} />}
+                                  REJECT / ROLLBACK
+                                </button>
+                              </div>
+                            </div>
+                          ) : acceptanceStatus === 'accepted' ? (
+                            <div className="bg-emerald-950/60 border border-emerald-500/60 p-3 rounded text-center text-xs text-emerald-200 font-semibold">
+                              ✓ Architecture change accepted and persisted in Digital Twin.
+                            </div>
+                          ) : (
+                            <div className="bg-slate-900 border border-slate-700 p-3 rounded text-center text-xs text-slate-300 font-semibold">
+                              ↺ Architecture change rejected. Sandbox restored to previous state.
+                            </div>
+                          )}
+
+                          {/* Environment Switch Action */}
+                          {appliedComparison.sandbox_environment_id && appliedComparison.sandbox_environment_id !== selectedEnv && (
+                            <button
+                              onClick={() => {
+                                setSelectedEnv(appliedComparison.sandbox_environment_id);
+                                setSelectedNode(null);
+                                setSimResult(null);
+                                setAppliedComparison(null);
+                                setShowSolutions(null);
+                              }}
+                              className="w-full bg-teal-600 hover:bg-teal-500 text-white font-semibold text-xs py-2.5 rounded flex items-center justify-center gap-2 transition shadow-lg shadow-teal-950/40"
+                            >
+                              <Layers size={14} />
+                              Inspect Mutated Topology in Sandbox ({appliedComparison.sandbox_environment_id})
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

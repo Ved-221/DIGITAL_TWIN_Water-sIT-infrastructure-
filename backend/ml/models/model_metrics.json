@@ -1,0 +1,53 @@
+{
+  "samples_count": 14400,
+  "train_samples": 11520,
+  "test_samples": 2880,
+  "features_count": 47,
+  "r2_score": 0.9827,
+  "rmse": 0.0404,
+  "mae": 0.0316,
+  "accuracy": 0.9764,
+  "f1_score": 0.9612,
+  "top_features": [
+    {
+      "feature": "strategy_type_read_replica_offload",
+      "importance": 0.1887
+    },
+    {
+      "feature": "component_type_database",
+      "importance": 0.1662
+    },
+    {
+      "feature": "strategy_complexity",
+      "importance": 0.1403
+    },
+    {
+      "feature": "upstream_callers_count",
+      "importance": 0.1392
+    },
+    {
+      "feature": "component_type_storage",
+      "importance": 0.0412
+    },
+    {
+      "feature": "component_type_lambda",
+      "importance": 0.0366
+    },
+    {
+      "feature": "requires_data_sync",
+      "importance": 0.0299
+    },
+    {
+      "feature": "provides_redundancy",
+      "importance": 0.0245
+    },
+    {
+      "feature": "strategy_type_phased_blue_green",
+      "importance": 0.023
+    },
+    {
+      "feature": "zero_downtime_capable",
+      "importance": 0.0224
+    }
+  ]
+}

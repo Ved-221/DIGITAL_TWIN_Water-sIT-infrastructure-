@@ -40,9 +40,10 @@ def run_multi_agent_analysis(simulation_result: Dict[str, Any]) -> Dict[str, str
     # Agent 1: Financial Analyst
     financial_prompt = f"""
     You are the Lead Cloud Financial Analyst. 
-    Analyze the following migration simulation data.
-    Focus strictly on the 'cost_delta_monthly'. 
-    If the data is currently using fallback values, treat them as initial estimates, but evaluate the 15% migration penalty.
+    Analyze the following operational simulation data.
+    Focus strictly on the 'cost_delta_monthly' and 'cost_explanation'.
+    Do NOT invent pricing figures or make arbitrary percentage assumptions.
+    If the cost data indicates 'None' or requires additional inputs, explicitly state what pricing metrics are missing.
     Keep your response concise (3-4 sentences).
     
     Simulation Data:
@@ -52,9 +53,10 @@ def run_multi_agent_analysis(simulation_result: Dict[str, Any]) -> Dict[str, str
     # Agent 2: Security & Risk Analyst
     risk_prompt = f"""
     You are the Senior Infrastructure Risk Assessor.
-    Analyze the following migration simulation data.
-    Focus strictly on the 'risk_score', 'estimated_downtime_minutes', 'affected_count', and 'critical_flags'.
-    Explain the severity of the cross-environment dependencies and blast radius.
+    Analyze the following operational simulation data.
+    Focus strictly on 'risk_score', 'risk_level', 'risk_factors', 'estimated_downtime_minutes', 'downtime_explanation', and 'critical_flags'.
+    Explain the severity of the topology blast radius and dependency exposure based ONLY on the provided graph data.
+    Do NOT invent dependencies, latency numbers, or unmeasured metrics.
     Keep your response concise (3-4 sentences).
     
     Simulation Data:

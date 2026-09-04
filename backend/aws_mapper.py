@@ -61,7 +61,7 @@ def extract_dependencies(resources):
         # Subnet -> VPC relationship
         # Rationale: Subnets inherently belong to and depend on a VPC
         if rtype == "AWS::EC2::Subnet":
-            vpc_id = raw.get('vpcId')
+            vpc_id = raw.get('vpcId') or raw.get('VpcId')
             if vpc_id:
                 target_id = get_component_id("AWS::EC2::VPC", vpc_id)
                 dependencies.append({
@@ -74,7 +74,7 @@ def extract_dependencies(resources):
         # SecurityGroup -> VPC relationship
         # Rationale: Security Groups belong to a VPC
         elif rtype == "AWS::EC2::SecurityGroup":
-            vpc_id = raw.get('vpcId')
+            vpc_id = raw.get('vpcId') or raw.get('VpcId')
             if vpc_id:
                 target_id = get_component_id("AWS::EC2::VPC", vpc_id)
                 dependencies.append({
@@ -86,7 +86,7 @@ def extract_dependencies(resources):
 
         # EC2 Instance relationships
         elif rtype == "AWS::EC2::Instance":
-            vpc_id = raw.get('vpcId')
+            vpc_id = raw.get('vpcId') or raw.get('VpcId')
             if vpc_id:
                 dependencies.append({
                     "source_id": source_id,
@@ -95,7 +95,7 @@ def extract_dependencies(resources):
                     "criticality": "high"
                 })
             
-            subnet_id = raw.get('subnetId')
+            subnet_id = raw.get('subnetId') or raw.get('SubnetId')
             if subnet_id:
                 dependencies.append({
                     "source_id": source_id,
@@ -104,8 +104,8 @@ def extract_dependencies(resources):
                     "criticality": "high"
                 })
                 
-            for sg in raw.get('securityGroups', []):
-                sg_id = sg.get('groupId')
+            for sg in raw.get('securityGroups', []) or raw.get('SecurityGroups', []):
+                sg_id = sg.get('groupId') or sg.get('GroupId')
                 if sg_id:
                     dependencies.append({
                         "source_id": source_id,
@@ -116,8 +116,8 @@ def extract_dependencies(resources):
                     
         # RDS DBInstance relationships
         elif rtype == "AWS::RDS::DBInstance":
-            db_subnet_group = raw.get('dbSubnetGroup', {})
-            vpc_id = db_subnet_group.get('vpcId')
+            db_subnet_group = raw.get('dbSubnetGroup', {}) or raw.get('DBSubnetGroup', {})
+            vpc_id = db_subnet_group.get('vpcId') or db_subnet_group.get('VpcId')
             if vpc_id:
                 dependencies.append({
                     "source_id": source_id,
@@ -126,8 +126,8 @@ def extract_dependencies(resources):
                     "criticality": "high"
                 })
             
-            for sg in raw.get('vpcSecurityGroups', []):
-                sg_id = sg.get('vpcSecurityGroupId')
+            for sg in raw.get('vpcSecurityGroups', []) or raw.get('VpcSecurityGroups', []):
+                sg_id = sg.get('vpcSecurityGroupId') or sg.get('VpcSecurityGroupId')
                 if sg_id:
                     dependencies.append({
                         "source_id": source_id,
@@ -138,7 +138,7 @@ def extract_dependencies(resources):
                     
         # ELBv2 LoadBalancer relationships
         elif rtype == "AWS::ElasticLoadBalancingV2::LoadBalancer":
-            vpc_id = raw.get('vpcId')
+            vpc_id = raw.get('vpcId') or raw.get('VpcId')
             if vpc_id:
                 dependencies.append({
                     "source_id": source_id,

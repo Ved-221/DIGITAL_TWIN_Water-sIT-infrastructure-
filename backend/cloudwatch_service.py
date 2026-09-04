@@ -102,30 +102,36 @@ def _get_metric_average(client, namespace, metric_name, dimensions, period, days
         return None
 
 def get_cpu_utilization(component, period=300):
-    client = _get_cw_client(component)
-    namespace, dimensions = _get_dimensions_and_namespace(component)
-    if namespace in ["AWS/EC2", "AWS/RDS"]:
-        return _get_metric_average(client, namespace, "CPUUtilization", dimensions, period)
+    try:
+        client = _get_cw_client(component)
+        namespace, dimensions = _get_dimensions_and_namespace(component)
+        if namespace in ["AWS/EC2", "AWS/RDS"]:
+            return _get_metric_average(client, namespace, "CPUUtilization", dimensions, period)
+    except Exception:
+        pass
     return None
 
 def get_memory_utilization(component, period=300):
-    client = _get_cw_client(component)
-    namespace, dimensions = _get_dimensions_and_namespace(component)
-    if namespace == "AWS/RDS":
-        # Returns raw bytes converted to MB
-        val = _get_metric_average(client, namespace, "FreeableMemory", dimensions, period)
-        if val is not None:
-            return round(val / (1024 * 1024), 2)
+    try:
+        client = _get_cw_client(component)
+        namespace, dimensions = _get_dimensions_and_namespace(component)
+        if namespace == "AWS/RDS":
+            # Returns raw bytes converted to MB
+            val = _get_metric_average(client, namespace, "FreeableMemory", dimensions, period)
+            if val is not None:
+                return round(val / (1024 * 1024), 2)
+    except Exception:
+        pass
     return None
 
 def get_active_alarms(component):
-    client = _get_cw_client(component)
-    namespace, dimensions = _get_dimensions_and_namespace(component)
-    if not dimensions:
-        return []
-    
     alarms = []
     try:
+        client = _get_cw_client(component)
+        namespace, dimensions = _get_dimensions_and_namespace(component)
+        if not dimensions:
+            return []
+        
         if namespace in ["AWS/EC2", "AWS/RDS"]:
             res = client.describe_alarms_for_metric(
                 MetricName="CPUUtilization",
@@ -135,7 +141,7 @@ def get_active_alarms(component):
             for alarm in res.get("MetricAlarms", []):
                 if alarm.get("StateValue") == "ALARM":
                     alarms.append(alarm.get("AlarmName"))
-    except ClientError:
+    except Exception:
         pass
     return alarms
 
