@@ -65,7 +65,11 @@ def generate_fallback_explanation(simulation_data: Dict[str, Any]) -> Tuple[str,
 
     # 2. Why ML recommended action
     if ml_reasoning:
-        telemetry_signals = [f"{r.get('feature')}={r.get('value')} ({r.get('impact')} impact)" for r in ml_reasoning]
+        telemetry_signals = [
+            f"{r.get('feature', str(r))}={r.get('value', 'N/A')} ({r.get('impact', 'neutral')} impact)"
+            if isinstance(r, dict) else str(r)
+            for r in ml_reasoning
+        ]
         signals_str = ", ".join(telemetry_signals)
         conf_str = f" with {int(ml_confidence * 100)}% model confidence" if ml_confidence is not None else ""
         source_label = "user-configured simulation assumptions" if is_manual else "current operational telemetry signals"

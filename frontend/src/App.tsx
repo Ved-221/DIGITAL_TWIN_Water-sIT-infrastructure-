@@ -3,28 +3,30 @@ import {
   ReactFlow,
   Controls,
   Background,
-  BackgroundVariant,
+  MiniMap,
   useNodesState,
   useEdgesState,
   addEdge,
   Handle,
-  Position,
-  Panel
+  Position
 } from '@xyflow/react';
 import type { Node, Edge, Connection } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import classNames from 'classnames';
 import { 
   AlertTriangle, LayoutDashboard, Share2, Server, 
-  RefreshCw, Key, XCircle, Search, RotateCcw, Plus, Link, Trash2
+  RefreshCw, Key, XCircle, Search, RotateCcw, Plus, Link, Trash2,
+  Sparkles, CheckCircle2
 } from 'lucide-react';
 
 import { AWSConnectModal } from './components/AWSConnectModal';
+import { BuildTwinModal } from './components/BuildTwinModal';
 import { DashboardView } from './components/DashboardView';
 import { EmptyState } from './components/EmptyState';
 import { InspectorDrawer } from './components/InspectorDrawer';
 import { ManualResourceModal } from './components/ManualResourceModal';
 import { ManualDependencyModal } from './components/ManualDependencyModal';
+import { WhatIfScenarioPanel } from './components/WhatIfScenarioPanel';
 import { calculateTopologyLayout } from './utils/topologyLayout';
 import { formatINR, getRegionDisplayName } from './utils/localization';
 
@@ -50,7 +52,21 @@ const CustomNode = ({ data, selected }: { data: any; selected: boolean }) => {
   const isBlastRadius = data.blastRadius;
   const isProposed = data.discovery_source === 'proposed' || data.metadata_col?.is_proposed;
   const isAWS = (data.discovery_source === 'aws_api' || data.arn != null) && !isProposed;
-  const isManual = data.discovery_source === 'manual' && !isProposed;
+  const isDescribed = (data.discovery_source === 'user_description' || data.source === 'user_description') && !isProposed;
+  const isStructured = (data.discovery_source === 'manual_structured' || data.source === 'manual_structured') && !isProposed;
+  const isManual = (data.discovery_source === 'manual' || isDescribed || isStructured) && !isProposed && !isAWS;
+
+  const badgeLabel = isProposed
+    ? 'PROPOSED'
+    : isAWS
+    ? 'AWS'
+    : isDescribed
+    ? 'DESCRIBED'
+    : isStructured
+    ? 'STRUCTURED'
+    : isManual
+    ? 'MANUAL'
+    : 'SEED';
 
   return (
     <div
@@ -87,10 +103,12 @@ const CustomNode = ({ data, selected }: { data: any; selected: boolean }) => {
           "font-mono px-1.5 py-0.5 rounded text-[9px] font-semibold",
           isProposed ? "bg-purple-950 text-purple-300 border border-purple-700" :
           isAWS ? "bg-emerald-950 text-emerald-400 border border-emerald-800" :
+          isDescribed ? "bg-indigo-950 text-indigo-300 border border-indigo-700" :
+          isStructured ? "bg-teal-950 text-teal-300 border border-teal-700" :
           isManual ? "bg-cyan-950 text-cyan-400 border border-cyan-800" :
           "bg-slate-700 text-slate-300"
         )}>
-          {isProposed ? 'PROPOSED' : isAWS ? 'AWS' : isManual ? 'MANUAL' : 'SEED'}
+          {badgeLabel}
         </span>
       </div>
 
@@ -145,12 +163,15 @@ export default function App() {
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [isResourceModalOpen, setIsResourceModalOpen] = useState(false);
   const [isDependencyModalOpen, setIsDependencyModalOpen] = useState(false);
+  const [isBuildTwinModalOpen, setIsBuildTwinModalOpen] = useState(false);
+  const [whatIfTargetNode, setWhatIfTargetNode] = useState<any | null>(null);
   const [editResource, setEditResource] = useState<any | null>(null);
   const [pendingSourceId, setPendingSourceId] = useState<string | null>(null);
   const [pendingTargetId, setPendingTargetId] = useState<string | null>(null);
   const [hasCycle, setHasCycle] = useState(false);
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -537,8 +558,6 @@ export default function App() {
   const handleSimulate = async (useMl: boolean = false) => {
     if (!selectedNode) return;
     setSimulating(true);
-    setShowSolutions(null);
-    setAppliedComparison(null);
     
     try {
       const activeEnv = selectedEnv || selectedNode.source_environment || "aws";
@@ -549,7 +568,8 @@ export default function App() {
           target_component_id: selectedNode.id,
           action: useMl ? "auto" : "migrate",
           use_ml_recommendation: useMl,
-          destination_env: "cloud"
+          destination_env: "cloud",
+          source_environment: activeEnv
         })
       });
       
@@ -681,6 +701,13 @@ export default function App() {
           ) : isManual ? (
             <>
               <button
+                onClick={() => setIsBuildTwinModalOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 rounded-lg text-xs font-bold text-white transition shadow-sm"
+              >
+                <Sparkles size={14} />
+                <span>Build Twin (NLP)</span>
+              </button>
+              <button
                 onClick={() => { setEditResource(null); setIsResourceModalOpen(true); }}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-xs font-bold text-white transition shadow-sm"
               >
@@ -769,6 +796,22 @@ export default function App() {
         </div>
       )}
 
+      {/* Dismissible Success Notification Banner */}
+      {successMessage && (
+        <div className="bg-emerald-950/90 border-b border-emerald-800 px-4 py-2.5 text-xs text-emerald-200 flex items-center justify-between z-10 animate-in fade-in">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />
+            <span>{successMessage}</span>
+          </div>
+          <button 
+            onClick={() => setSuccessMessage(null)} 
+            className="text-emerald-300 hover:text-white p-1 rounded"
+          >
+            <XCircle size={15} />
+          </button>
+        </div>
+      )}
+
       {/* Main Content Area */}
       {selectedEnv === null || !hasResources ? (
         <EmptyState
@@ -783,6 +826,7 @@ export default function App() {
           onSelectAWS={handleSelectAWS}
           onSelectManual={handleSelectManual}
           onAddResource={() => { setEditResource(null); setIsResourceModalOpen(true); }}
+          onOpenBuildTwin={() => setIsBuildTwinModalOpen(true)}
           loading={syncing || loading}
         />
       ) : activeTab === 'dashboard' ? (
@@ -858,6 +902,7 @@ export default function App() {
               simulating={simulating}
               onSimulate={handleSimulate}
               onClose={() => setSelectedNode(null)}
+              onOpenWhatIf={(node) => setWhatIfTargetNode(node)}
               onEditManualResource={(node) => {
                 setEditResource(node);
                 setIsResourceModalOpen(true);
@@ -906,6 +951,28 @@ export default function App() {
         components={rawComponents}
         initialSourceId={pendingSourceId}
         initialTargetId={pendingTargetId}
+      />
+
+      {/* Build Digital Twin Modal */}
+      <BuildTwinModal
+        isOpen={isBuildTwinModalOpen}
+        onClose={() => setIsBuildTwinModalOpen(false)}
+        onTwinCreated={async (result) => {
+          setSelectedEnv('manual');
+          sessionStorage.setItem('infratwin_env', 'manual');
+          setSelectedNode(null);
+          setSimResult(null);
+          setSuccessMessage(result.message || 'Successfully created Digital Twin from system specification.');
+          await fetchData();
+        }}
+      />
+
+      {/* What-If Scenario Engine Panel */}
+      <WhatIfScenarioPanel
+        isOpen={Boolean(whatIfTargetNode)}
+        targetNode={whatIfTargetNode}
+        sourceEnvironment={selectedEnv || 'aws'}
+        onClose={() => setWhatIfTargetNode(null)}
       />
 
     </div>

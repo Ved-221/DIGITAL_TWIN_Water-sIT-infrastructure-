@@ -22,36 +22,45 @@ def create_snapshot(
         serialized_comps.append({
             "id": c.id,
             "name": c.name,
-            "type": c.type,
-            "environment": c.environment,
-            "environment_id": c.environment_id,
-            "provider": c.provider,
-            "region": c.region,
+            "type": c.type.value if hasattr(c.type, "value") else str(c.type or "application"),
+            "environment": c.environment.value if hasattr(c.environment, "value") else str(c.environment or "cloud"),
+            "environment_id": getattr(c, "environment_id", c.source_environment),
+            "provider": getattr(c, "provider", "aws"),
+            "region": getattr(c, "region", "us-east-1"),
             "location": c.location,
-            "criticality": c.criticality,
+            "criticality": c.criticality.value if hasattr(c.criticality, "value") else str(c.criticality or "medium"),
             "owner": c.owner,
-            "status": c.status,
+            "status": c.status.value if hasattr(c.status, "value") else str(c.status or "active"),
             "cpu": c.cpu,
             "memory": c.memory,
             "cost_per_month": c.cost_per_month,
-            "currency": c.currency,
-            "position_x": c.position_x,
-            "position_y": c.position_y,
+            "currency": getattr(c, "currency", "USD"),
+            "position_x": getattr(c, "position_x", 100),
+            "position_y": getattr(c, "position_y", 100),
             "metadata_col": dict(c.metadata_col or {}),
-            "telemetry": dict(c.telemetry or {}),
-            "source_environment": c.source_environment
+            "telemetry": getattr(c, "telemetry", {}),
+            "source_environment": c.source_environment,
+            "domain": getattr(c, "domain", "general"),
+            "properties": dict(c.properties or {}),
+            "arn": getattr(c, "arn", None),
+            "aws_region": getattr(c, "aws_region", None),
+            "discovery_source": getattr(c, "discovery_source", "manual")
         })
         
     serialized_deps = []
     for d in deps:
         serialized_deps.append({
             "id": d.id,
-            "environment_id": d.environment_id,
+            "environment_id": getattr(d, "environment_id", d.source),
             "source_id": d.source_id,
             "target_id": d.target_id,
+            "source_component_id": getattr(d, "source_component_id", d.source_id),
+            "target_component_id": getattr(d, "target_component_id", d.target_id),
             "relationship_type": d.relationship_type,
-            "criticality": d.criticality,
+            "criticality": d.criticality.value if hasattr(d.criticality, "value") else str(d.criticality or "medium"),
+            "source": d.source,
             "source_environment": d.source_environment,
+            "discovery_source": d.discovery_source,
             "metadata_col": dict(d.metadata_col or {})
         })
         

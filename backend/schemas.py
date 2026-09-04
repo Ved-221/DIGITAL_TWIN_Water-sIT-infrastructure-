@@ -1,6 +1,7 @@
 from pydantic import BaseModel, model_validator, ConfigDict
-from typing import List, Optional, Any, Dict
-from models import ComponentType, Environment, Criticality, Status, DependencyType
+from typing import List, Optional, Any, Dict, Union
+from models import ComponentType, EnvironmentEnum, Criticality, Status, DependencyType
+Environment = EnvironmentEnum
 
 class DependencyBase(BaseModel):
     source_component_id: str
@@ -79,12 +80,12 @@ class Dependency(DependencyBase):
 class ComponentBase(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="ignore")
     name: str
-    type: ComponentType
-    environment: Environment = Environment.cloud
+    type: Optional[ComponentType] = ComponentType.server
+    environment: Optional[Environment] = Environment.cloud
     location: Optional[str] = "us-east-1"
-    criticality: Criticality = Criticality.medium
+    criticality: Optional[Criticality] = Criticality.medium
     owner: Optional[str] = "Cloud Ops"
-    status: Status = Status.active
+    status: Optional[Status] = Status.active
     cpu: Optional[float] = None
     memory: Optional[float] = None
     cost_per_month: float = 0.0
@@ -94,7 +95,42 @@ class ComponentBase(BaseModel):
     account_id: Optional[str] = None
     availability_zone: Optional[str] = None
     updated_at: Optional[str] = None
+    domain: Optional[str] = "general"
+    properties: Optional[Dict[str, Any]] = {}
+    source: Optional[str] = None
+    source_id: Optional[str] = None
+    last_updated: Optional[str] = None
+    position_x: Optional[float] = None
+    position_y: Optional[float] = None
     metadata_col: dict = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def set_defaults_if_none(cls, data):
+        if isinstance(data, dict):
+            if data.get("environment") is None:
+                data["environment"] = Environment.cloud
+            if data.get("criticality") is None:
+                data["criticality"] = Criticality.medium
+            if data.get("type") is None:
+                data["type"] = ComponentType.server
+        elif hasattr(data, "__dict__"):
+            if getattr(data, "environment", None) is None:
+                try:
+                    setattr(data, "environment", Environment.cloud)
+                except Exception:
+                    pass
+            if getattr(data, "criticality", None) is None:
+                try:
+                    setattr(data, "criticality", Criticality.medium)
+                except Exception:
+                    pass
+            if getattr(data, "type", None) is None:
+                try:
+                    setattr(data, "type", ComponentType.server)
+                except Exception:
+                    pass
+        return data
 
 class ComponentCreate(ComponentBase):
     pass
@@ -131,7 +167,8 @@ class DowntimeEstimate(BaseModel):
     rationale: str
 
 class SimulationRequest(BaseModel):
-    target_component_id: str
+    target_component_id: Optional[str] = None
+    component_id: Optional[str] = None
     action: Optional[str] = "migrate"
     use_ml_recommendation: bool = False
     destination_env: Optional[str] = "cloud"
@@ -140,7 +177,7 @@ class SimulationRequest(BaseModel):
     use_ai: bool = False
 
     def get_component_id(self) -> str:
-        return self.component_id or self.target_component_id or ""
+        return self.target_component_id or self.component_id or ""
 
 class StructuredAIExplanation(BaseModel):
     what_is_happening: str
@@ -148,34 +185,123 @@ class StructuredAIExplanation(BaseModel):
     affected_components_summary: str
     simulation_prediction: str
     key_risks: str
-    engineer_considerations: List[str]
+class ConstraintsEvaluation(BaseModel):
+    cost_impact: Optional[float] = None
+    cost_impact_display: str = "Not enough data"
+    resilience: str = "Not enough data"
+    risk_reduction: str = "Not enough data"
+    risk_score_before: int = 0
+    risk_score_after: int = 0
+    downtime_minutes: int = 0
+    downtime_display: str = "0 min"
+    blast_radius_before: int = 0
+    blast_radius_after: int = 0
+    performance: str = "Not enough data"
+
+class FeasibleSolution(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="ignore")
+    id: str
+    name: Optional[str] = None
+    description: str
+    risk_level: Optional[str] = "LOW"
+    strategy_type: Optional[str] = "direct_lift_shift"
+    title: Optional[str] = None
+    action_type: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_name_and_title(cls, data):
+        if isinstance(data, dict):
+            t = data.get("title")
+            n = data.get("name")
+            if not n and t:
+                data["name"] = t
+            elif not t and n:
+                data["title"] = n
+            elif not n and not t:
+                data["name"] = data.get("id", "Solution")
+                data["title"] = data.get("id", "Solution")
+        elif hasattr(data, "__dict__"):
+            t = getattr(data, "title", None)
+            n = getattr(data, "name", None)
+            if not n and t:
+                setattr(data, "name", t)
+            elif not t and n:
+                setattr(data, "title", n)
+        return data
+    expected_impact: Optional[str] = None
+    is_feasible: Optional[bool] = True
+    feasibility_reason: Optional[str] = None
+    constraints_evaluation: Optional[ConstraintsEvaluation] = None
+    changes: Optional[Dict[str, Any]] = {}
+    estimated_downtime_minutes: Optional[int] = None
+    cost_delta_monthly: Optional[float] = None
+    feasibility_score: Optional[float] = None
+    predicted_suitability: Optional[float] = None
+    suitability_percentage: Optional[float] = None
+    confidence: Optional[str] = "High"
+    confidence_score: Optional[float] = None
+    supporting_features: List[str] = []
+    rank: Optional[int] = 1
+    ml_derived: Optional[bool] = True
+    downtime_basis: Optional[str] = None
+    cost_basis: Optional[str] = None
+    missing_data: List[str] = []
+    prerequisites: List[str] = []
+    pros: List[str] = []
+    cons: List[str] = []
+    implementation_steps: List[str] = []
 
 class SimulationResult(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="ignore")
     target_component_id: Optional[str] = None
+    component_id: Optional[str] = None
     target_component: str
-    change_action: str
-    action: Optional[str] = None
+    action: str = "migrate"
+    change_action: str = "migrate"
     recommended_action: Optional[str] = None
     destination: Optional[str] = None
-    affected_count: int
+    target_environment: Optional[str] = None
+    source_environment: Optional[str] = None
+    total_nodes_affected: int = 0
+    affected_count: int = 0
     blast_radius: int = 0
-    affected_components: List[str]
-    risk_score: int
-    risk_level: str
-    risk_factors: List[RiskFactor] = []
-    estimated_downtime_minutes: int
-    downtime_estimate: Optional[DowntimeEstimate] = None
-    cost_delta_monthly: float
-    cost_impact: float = 0.0
-    cost_breakdown: Optional[CostBreakdown] = None
+    affected_components: List[Any] = []
+    affected_components_details: Optional[List[Dict[str, Any]]] = []
+    affected_component_names: List[str] = []
+    upstream_impact_count: int = 0
+    upstream_impact: List[Dict[str, Any]] = []
+    downstream_dependencies_count: int = 0
+    downstream_dependencies: List[Dict[str, Any]] = []
+    blast_radius_nodes: List[str] = []
+    risk_score: float = 0.0
+    risk_level: str = "LOW"
+    estimated_downtime_minutes: Optional[int] = None
+    downtime_estimate: Optional[Any] = None
+    cost_delta_monthly: Optional[float] = None
+    cost_impact: Optional[float] = None
+    cost_breakdown: Optional[Any] = None
+    downtime_explanation: Optional[str] = None
+    cost_explanation: Optional[str] = None
     critical_flags: List[str] = []
     critical_warnings: List[str] = []
+    risk_factors: Union[Dict[str, Any], List[Any]] = {}
+    feasible_solutions: List[FeasibleSolution] = []
+    recommendations: List[str] = []
     ml_confidence: Optional[float] = None
-    ml_reasoning_features: Optional[List[ReasoningFeature]] = None
+    ml_reasoning_features: Optional[List[Any]] = None
     ai_explanation: Optional[str] = None
     ai_recommendation: Optional[str] = None
-    structured_explanation: Optional[StructuredAIExplanation] = None
-    environment_source: Optional[str] = "aws_api"
+    structured_explanation: Optional[Any] = None
+    financial_analysis: Optional[str] = None
+    risk_analysis: Optional[str] = None
+    architect_recommendation: Optional[str] = None
+    financial_summary: Optional[Dict[str, Any]] = None
+    risk_summary: Optional[Dict[str, Any]] = None
+    architect_summary: Optional[Dict[str, Any]] = None
+    recommended_actions: Optional[List[str]] = []
+    missing_data: List[str] = []
+    environment_source: Optional[str] = "manual"
     is_manual: bool = False
     configured_assumptions: Optional[Dict[str, Any]] = None
 
@@ -185,6 +311,7 @@ class TwinStats(BaseModel):
     total_monthly_cost: float
     on_prem_count: int
     cloud_count: int
+    currency: Optional[str] = "USD"
 
 class AWSSyncRequest(BaseModel):
     mode: str = "merge"
@@ -381,6 +508,7 @@ class ManualComponentCreate(BaseModel):
     location: Optional[str] = "us-east-1"
     owner: Optional[str] = "Infrastructure Team"
     cost_per_month: Optional[float] = 0.0
+    source_environment: Optional[str] = "manual"
     assumptions: Optional[ManualAssumptions] = None
     metadata: Optional[Dict[str, Any]] = None
 
@@ -396,11 +524,26 @@ class ManualComponentUpdate(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 class ManualDependencyCreate(BaseModel):
-    source_component_id: str
-    target_component_id: str
+    source_component_id: Optional[str] = None
+    target_component_id: Optional[str] = None
+    source_id: Optional[str] = None
+    target_id: Optional[str] = None
     relationship_type: str = "connects_to"
     criticality: Optional[Criticality] = Criticality.medium
+    source_environment: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_ids(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            src = data.get("source_component_id") or data.get("source_id")
+            tgt = data.get("target_component_id") or data.get("target_id")
+            data["source_component_id"] = src
+            data["source_id"] = src
+            data["target_component_id"] = tgt
+            data["target_id"] = tgt
+        return data
 
 class ManualEnvironmentResponse(BaseModel):
     success: bool
@@ -409,29 +552,19 @@ class ManualEnvironmentResponse(BaseModel):
     total_components: int = 0
     total_dependencies: int = 0
 
-class ConstraintsEvaluation(BaseModel):
-    cost_impact: Optional[float] = None
-    cost_impact_display: str = "Not enough data"
-    resilience: str = "Not enough data"
-    risk_reduction: str = "Not enough data"
-    risk_score_before: int = 0
-    risk_score_after: int = 0
-    downtime_minutes: int = 0
-    downtime_display: str = "0 min"
-    blast_radius_before: int = 0
-    blast_radius_after: int = 0
-    performance: str = "Not enough data"
-
-class FeasibleSolution(BaseModel):
+class EnvironmentSchema(BaseModel):
     id: str
-    title: str
-    action_type: str
-    description: str
-    expected_impact: str
-    is_feasible: bool = True
-    feasibility_reason: str
-    constraints_evaluation: ConstraintsEvaluation
-    changes: Dict[str, Any] = {}
+    name: str
+    provider: Optional[str] = "aws"
+    source_type: Optional[str] = "aws"
+    is_active: bool = True
+    status: Optional[str] = "connected"
+    created_at: Optional[str] = None
+    model_config = ConfigDict(from_attributes=True)
+
+class EnvironmentCreate(BaseModel):
+    name: str
+    provider: Optional[str] = "manual"
 
 class FeasibleSolutionsGenerateRequest(BaseModel):
     target_component_id: str
@@ -474,3 +607,336 @@ class ApplySolutionResponse(BaseModel):
     ai_explanation: Optional[str] = None
     ai_structured_explanation: Optional[Dict[str, Any]] = None
     updated_simulation: Optional[Dict[str, Any]] = None
+
+# ==========================================
+# Generic Digital Twin Builder Schemas
+# ==========================================
+
+class NaturalLanguageParseRequest(BaseModel):
+    description: str
+    domain: Optional[str] = "general"
+
+class ParsedComponentPreview(BaseModel):
+    temp_id: str
+    name: str
+    type: str
+    domain: Optional[str] = "general"
+    status: Optional[str] = "active"
+    criticality: Optional[str] = "medium"
+    properties: Optional[Dict[str, Any]] = {}
+    metrics: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = {}
+    source: str = "user_description"
+    source_id: Optional[str] = None
+    raw_mention: Optional[str] = None
+
+class ParsedDependencyPreview(BaseModel):
+    source_temp_id: str
+    target_temp_id: str
+    source_name: str
+    target_name: str
+    relationship_type: str
+    source: str = "user_description"
+    explicit_quote: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = {}
+
+class ParsedDigitalTwinPreview(BaseModel):
+    success: bool = True
+    domain: str = "general"
+    raw_description: str
+    components: List[ParsedComponentPreview] = []
+    dependencies: List[ParsedDependencyPreview] = []
+    ambiguities: List[str] = []
+    source: str = "user_description"
+
+class ApplyParsedTwinRequest(BaseModel):
+    domain: Optional[str] = "general"
+    components: List[ParsedComponentPreview]
+    dependencies: List[ParsedDependencyPreview]
+    clear_existing: bool = True
+
+class ApplyParsedTwinResponse(BaseModel):
+    success: bool = True
+    message: str
+    components_count: int
+    dependencies_count: int
+    components: List[Component] = []
+    dependencies: List[Dependency] = []
+
+class StructuredTwinBuildRequest(BaseModel):
+    domain: Optional[str] = "general"
+    components: List[Dict[str, Any]]
+    dependencies: List[Dict[str, Any]]
+    clear_existing: bool = True
+
+
+# ==========================================
+# What-If Candidate Solutions Schemas
+# ==========================================
+
+class WhatIfRequest(BaseModel):
+    target_component_id: str
+    action: str = "fail"
+    source_environment: Optional[str] = None
+
+
+class CandidateVsBaseline(BaseModel):
+    blast_radius_delta: Optional[int] = None
+    risk_score_delta: Optional[float] = None
+    downtime_delta: Optional[int] = None
+
+
+class CandidateSimulationResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    blast_radius: int = 0
+    upstream_impact_count: int = 0
+    downstream_dependencies_count: int = 0
+    risk_score: Optional[float] = None
+    risk_level: str = "unknown"
+    estimated_downtime_minutes: Optional[int] = None
+    cost_delta_monthly: Optional[float] = None
+    critical_flags: List[str] = []
+    spof_eliminated: bool = False
+    vs_baseline: Optional[CandidateVsBaseline] = None
+
+
+class WhatIfCandidate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    candidate_id: str
+    name: str
+    description: str = ""
+    strategy_type: str = "direct_lift_shift"
+    proposed_changes: List[str] = []
+    resulting_topology: Optional[Dict[str, Any]] = None
+    affected_components: List[Dict[str, Any]] = []
+    simulation_result: CandidateSimulationResult
+    available_metrics: List[str] = []
+    missing_data: List[str] = []
+    feasibility: str = "unknown"          # feasible | conditional | unknown | not_feasible
+    evidence: List[str] = []
+    pros: List[str] = []
+    cons: List[str] = []
+    prerequisites: List[str] = []
+    implementation_steps: List[str] = []
+    complexity: int = 1
+    provides_redundancy: bool = False
+    zero_downtime_capable: bool = False
+
+
+class WhatIfBaselineResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    target_component_id: str
+    target_component_name: str
+    action: str
+    source_environment: str
+    blast_radius: int = 0
+    upstream_impact_count: int = 0
+    downstream_dependencies_count: int = 0
+    risk_score: float = 0.0
+    risk_level: str = "LOW"
+    is_single_point_of_failure: bool = False
+    topology: Optional[Dict[str, Any]] = None
+
+
+class CandidateFeatureSet(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    candidate_id: str
+    strategy_type: str
+    component_type: str = "unknown"
+    criticality: str = "unknown"
+    action: str = "fail"
+    affected_component_count: int = 0
+    upstream_impact_count: int = 0
+    downstream_dependencies_count: int = 0
+    dependency_depth: int = 0
+    critical_dependency_count: int = 0
+    spof_indicator: bool = False
+    spof_eliminated: bool = False
+    topology_change_size: int = 0
+    dependency_change_count: int = 0
+    available_health_metrics: List[str] = []
+    available_resource_metrics: List[str] = []
+    cost_delta: Optional[float] = None
+    cost_data_available: bool = False
+    estimated_downtime_minutes: Optional[int] = None
+    downtime_data_available: bool = False
+    risk_score: Optional[float] = None
+    risk_score_available: bool = False
+    risk_score_delta: Optional[float] = None
+    blast_radius_delta: Optional[int] = None
+    provides_redundancy: bool = False
+    zero_downtime_capable: bool = False
+    complexity: int = 1
+    feasibility: str = "unknown"
+    missing_data: List[str] = []
+
+
+class MLRankingItem(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    candidate_id: str
+    rank: int
+    recommendation: bool = False
+    ranking_method: str = "Simulation-Trained ML Prototype"
+    features_used: List[str] = []
+    explanation: str = ""
+
+
+class MLRecommendationSummary(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    recommended_candidate_id: str
+    candidate_name: str
+    strategy_type: str
+    reasoning: str
+    ranking_method: str
+    limitations: List[str] = []
+
+
+class AgentReport(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    agent: str
+    summary: str
+    cost_status: Optional[str] = None
+    findings: List[str] = []
+    evidence: List[str] = []
+    unknowns: List[str] = []
+    recommendation: str = ""
+    recommended_candidate_id: Optional[str] = None
+    status: str = "complete"
+
+
+class AgentConsensus(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    candidate_id: Optional[str] = None
+    agreement: str = "none"
+    reasoning: List[str] = []
+    conflicts: List[Dict[str, Any]] = []
+    ml_alignment: bool = False
+
+
+class MultiAgentDecision(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    financial: AgentReport
+    risk: AgentReport
+    architect: AgentReport
+    consensus: AgentConsensus
+
+
+class WhatIfCandidateResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    success: bool = True
+    target_component_id: str
+    target_component_name: Optional[str] = ""
+    action: str
+    source_environment: str
+    original_baseline: Optional[WhatIfBaselineResult] = None
+    candidate_count: int = 0
+    candidates: List[WhatIfCandidate] = []
+    scenario: Optional[Dict[str, Any]] = None
+    simulation_results: List[Dict[str, Any]] = []
+    extracted_features: List[CandidateFeatureSet] = []
+    ml_ranking: List[MLRankingItem] = []
+    ranking: List[MLRankingItem] = []
+    recommended_candidate_id: Optional[str] = None
+    recommendation: Optional[MLRecommendationSummary] = None
+    ranking_status: str = "unavailable"
+    ranking_method: Optional[str] = None
+    evidence: List[str] = []
+    missing_data: List[str] = []
+    limitations: List[str] = []
+    agents: Optional[MultiAgentDecision] = None
+    consensus: Optional[AgentConsensus] = None
+    financial_analyst: Optional[AgentReport] = None
+    risk_analyst: Optional[AgentReport] = None
+    system_architect: Optional[AgentReport] = None
+    error: Optional[str] = None
+
+
+# ─── Sandbox Execution Schemas ───────────────────────────────────────────────
+
+class SandboxApplyRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    source_environment: str = "manual"
+    target_component_id: str
+    candidate_id: Optional[str] = None
+    action: str = "fail"
+    candidate_data: Optional[Dict[str, Any]] = None
+    sandbox_env_id: str = "sandbox"
+
+
+class SandboxApplyResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    success: bool = True
+    sandbox_id: str
+    target_environment: str
+    source_environment: str
+    target_component_id: str
+    original_component_id: str
+    candidate_id: Optional[str] = None
+    strategy_type: Optional[str] = None
+    snapshot_id: str
+    remediation_outcome: str
+    mutations_applied: List[str] = []
+    topology_diff: Dict[str, Any] = {}
+    before: Dict[str, Any] = {}
+    after: Dict[str, Any] = {}
+    delta: Dict[str, Any] = {}
+    tradeoffs: List[str] = []
+    missing_data: List[str] = []
+
+
+class SandboxRollbackRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    snapshot_id: str
+    environment_id: Optional[str] = "sandbox"
+    sandbox_id: Optional[str] = None
+    target_component_id: Optional[str] = None
+
+
+class SandboxRollbackResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    restored: bool = True
+    snapshot_id: str
+    environment_id: str
+    sandbox_id: str
+    components_count: int = 0
+    dependencies_count: int = 0
+    status: str = "rejected"
+
+
+class SandboxAcceptRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    snapshot_id: str
+    environment_id: Optional[str] = "sandbox"
+    sandbox_id: Optional[str] = None
+
+
+class SandboxAcceptResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    accepted: bool = True
+    snapshot_id: str
+    environment_id: str
+    sandbox_id: str
+    status: str = "accepted"
+
+
+class SandboxBeforeAfterResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    snapshot_id: str
+    environment_id: str
+    status: str
+    solution_id: Optional[str] = None
+    solution_name: Optional[str] = None
+    strategy_type: Optional[str] = None
+    created_at: Optional[str] = None
+    baseline_components_count: int = 0
+    current_components_count: int = 0
+    baseline_dependencies_count: int = 0
+    current_dependencies_count: int = 0
+    baseline_monthly_cost: float = 0.0
+    current_monthly_cost: float = 0.0
+    monthly_cost_delta: float = 0.0
+
+
+
+
+

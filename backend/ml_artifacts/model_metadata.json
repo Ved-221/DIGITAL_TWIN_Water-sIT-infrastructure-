@@ -1,6 +1,6 @@
 {
   "model_type": "RandomForestClassifier",
-  "trained_at": "2026-09-04T05:40:44.015918+00:00",
+  "trained_at": "2026-09-04T17:57:13.148140+00:00",
   "n_samples_total": 280,
   "n_samples_train": 195,
   "n_samples_val": 43,
@@ -201,5 +201,5 @@
       "importance": 0.018
     }
   ],
-  "model_file": "/Users/admin/Documents/Digital_Twin/DIGITAL_TWIN_Water-sIT-infrastructure-/backend/ml_artifacts/recommendation_model.joblib"
+  "model_file": "/Users/admin/Documents/DigitalTwin_ved/DIGITAL_TWIN_Water-sIT-infrastructure-/backend/ml_artifacts/recommendation_model.joblib"
 }

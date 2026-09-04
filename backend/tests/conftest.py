@@ -15,6 +15,11 @@ test_engine = create_engine(
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 
+import database
+database.SessionLocal = TestingSessionLocal
+database.engine = test_engine
+Base.metadata.create_all(bind=test_engine)
+
 @pytest.fixture(scope="session")
 def client():
     def override_get_db():
@@ -34,6 +39,7 @@ def setup_database():
     Base.metadata.create_all(bind=test_engine)
     yield
     Base.metadata.drop_all(bind=test_engine)
+    Base.metadata.create_all(bind=test_engine)
 
 @pytest.fixture
 def db():

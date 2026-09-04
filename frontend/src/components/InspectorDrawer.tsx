@@ -16,6 +16,7 @@ interface InspectorDrawerProps {
   simResult: any;
   simulating: boolean;
   onSimulate: (useMl: boolean) => void;
+  onOpenWhatIf?: (node: any) => void;
   onClose?: () => void;
   onEditManualResource?: (node: any) => void;
   onDeleteManualResource?: (nodeId: string) => void;
@@ -32,6 +33,7 @@ export const InspectorDrawer: React.FC<InspectorDrawerProps> = ({
   simResult,
   simulating,
   onSimulate,
+  onOpenWhatIf,
   onClose,
   onEditManualResource,
   onDeleteManualResource,
@@ -206,6 +208,18 @@ export const InspectorDrawer: React.FC<InspectorDrawerProps> = ({
             )}
           </div>
         </div>
+
+        {/* What If Scenario Quick Launch */}
+        {onOpenWhatIf && (
+          <button
+            type="button"
+            onClick={() => onOpenWhatIf(selectedNode)}
+            className="w-full py-2 bg-purple-950/60 hover:bg-purple-900/80 border border-purple-800/80 rounded-lg text-xs font-bold text-purple-200 transition flex items-center justify-center gap-2 shadow-sm"
+          >
+            <Sliders size={13} className="text-purple-300" />
+            <span>Ask "What If?" for this component</span>
+          </button>
+        )}
 
         {/* Manual Resource Action Bar */}
         {isManualResource && (
@@ -441,6 +455,17 @@ export const InspectorDrawer: React.FC<InspectorDrawerProps> = ({
         </div>
 
         <div className="flex flex-col gap-2">
+          {onOpenWhatIf && (
+            <button
+              type="button"
+              onClick={() => onOpenWhatIf(selectedNode)}
+              className="w-full py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 rounded-md font-bold transition flex items-center justify-center gap-2 shadow-lg shadow-purple-950/20 text-xs text-white"
+            >
+              <Sliders size={14} className="text-purple-200" />
+              <span>What If? (Scenario Engine)</span>
+            </button>
+          )}
+
           {isManualResource ? (
             <button 
               onClick={() => handleSimulateAction(false)}

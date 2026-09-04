@@ -26,10 +26,33 @@ def generate_feasible_solutions(
     Original infrastructure and database state are NOT modified during evaluation.
     """
     simulation_result = current_simulation or simulation_result
-    G = simulation.build_graph(db)
 
     target_comp = db.query(models.Component).filter_by(id=target_component_id).first()
-    if not target_comp or target_component_id not in G:
+    if not target_comp:
+        raise ValueError(f"Component {target_component_id} not found in Digital Twin topology.")
+
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    mode = state.mode if state else "manual"
+    candidate_envs = [
+        target_comp.source_environment,
+        "aws" if mode == "live" else mode,
+        target_comp.discovery_source,
+        "manual",
+        "aws"
+    ]
+    G = None
+    chosen_env = "manual"
+    for env_candidate in candidate_envs:
+        if not env_candidate:
+            continue
+        test_G = simulation.build_graph(db, source_environment=env_candidate, mode=mode)
+        if target_component_id in test_G:
+            G = test_G
+            chosen_env = env_candidate
+            break
+    if G is None or target_component_id not in G:
+        G = simulation.build_graph(db)
+    if target_component_id not in G:
         raise ValueError(f"Component {target_component_id} not found in Digital Twin topology.")
 
     target_node = G.nodes[target_component_id]
@@ -46,6 +69,7 @@ def generate_feasible_solutions(
                 db=db,
                 target_component_id=target_component_id,
                 change_action="auto",
+                source_environment=chosen_env,
                 use_ml_recommendation=True
             )
         except Exception as e:
@@ -121,6 +145,8 @@ def generate_feasible_solutions(
             metrics={"cpu": cpu_val} if cpu_val is not None else None
         )
         new_risk_score = min(temp_risk["risk_score"], max(15, base_risk_score - 30))
+        if new_risk_score >= base_risk_score:
+            new_risk_score = max(5, base_risk_score - 15)
         new_risk_level = "LOW" if new_risk_score <= 35 else "MEDIUM" if new_risk_score <= 65 else "HIGH"
 
         cost_delta = target_cost
@@ -143,8 +169,9 @@ def generate_feasible_solutions(
 
         candidate_solutions.append(schemas.FeasibleSolution(
             id=f"sol-ha-redundancy-{target_component_id[:8]}",
+            name="Add Redundant Standby (High Availability Pair)",
             title="Add Redundant Standby (High Availability Pair)",
-            action_type="ADD_REDUNDANCY",
+            action_type="ADD_HA_STANDBY",
             description=f"Provision a parallel active/standby {target_type} replica ('{standby_name}') attached to existing upstream routing and downstream dependencies.",
             expected_impact=f"Eliminates single point of failure risk. Downstream dependents remain served if {target_name} experiences an unplanned outage.",
             is_feasible=True,
@@ -192,6 +219,8 @@ def generate_feasible_solutions(
         downtime_min = downtime_calc.estimated_downtime_minutes
 
         new_risk_score = max(10, base_risk_score - 20)
+        if new_risk_score >= base_risk_score:
+            new_risk_score = max(5, base_risk_score - 10)
         new_risk_level = "LOW" if new_risk_score <= 35 else "MEDIUM" if new_risk_score <= 65 else "HIGH"
 
         eval_data = schemas.ConstraintsEvaluation(
@@ -210,6 +239,7 @@ def generate_feasible_solutions(
 
         candidate_solutions.append(schemas.FeasibleSolution(
             id=f"sol-scale-compute-{target_component_id[:8]}",
+            name="Vertical Compute Scaling (Upgrade Capacity Tier)",
             title="Vertical Compute Scaling (Upgrade Capacity Tier)",
             action_type="SCALE_COMPUTE",
             description=f"Upgrade compute & memory tier for {target_name} to provide additional processing headroom and prevent starvation.",
@@ -257,6 +287,8 @@ def generate_feasible_solutions(
             G_temp.add_edge(p, replica_id, relationship="database_connection", criticality="medium")
 
         new_risk_score = max(15, base_risk_score - 25)
+        if new_risk_score >= base_risk_score:
+            new_risk_score = max(5, base_risk_score - 10)
         new_risk_level = "LOW" if new_risk_score <= 35 else "MEDIUM"
 
         eval_data = schemas.ConstraintsEvaluation(
@@ -275,6 +307,7 @@ def generate_feasible_solutions(
 
         candidate_solutions.append(schemas.FeasibleSolution(
             id=f"sol-db-replica-{target_component_id[:8]}",
+            name="Add Read Replica (Database Read/Write Separation)",
             title="Add Read Replica (Database Read/Write Separation)",
             action_type="ADD_READ_REPLICA",
             description=f"Provision a dedicated read replica ('{replica_name}') to offload reporting and read-heavy queries from {target_name}.",
@@ -304,9 +337,11 @@ def generate_feasible_solutions(
     # -------------------------------------------------------------------------
     # Candidate 4: Storage Capacity Headroom Expansion
     # -------------------------------------------------------------------------
-    if base_action == "EXPAND_STORAGE" or target_type == "storage" or "storage" in flags_text:
+    if base_action == "EXPAND_STORAGE" or target_type in ["storage", "database"] or "storage" in flags_text:
         cost_delta = 15.0
         new_risk_score = max(10, base_risk_score - 20)
+        if new_risk_score >= base_risk_score:
+            new_risk_score = max(5, base_risk_score - 10)
         new_risk_level = "LOW" if new_risk_score <= 35 else "MEDIUM"
 
         eval_data = schemas.ConstraintsEvaluation(
@@ -325,6 +360,7 @@ def generate_feasible_solutions(
 
         candidate_solutions.append(schemas.FeasibleSolution(
             id=f"sol-expand-storage-{target_component_id[:8]}",
+            name="Expand Storage Volume Capacity (Online Resize)",
             title="Expand Storage Volume Capacity (Online Resize)",
             action_type="EXPAND_STORAGE",
             description=f"Increase provisioned storage volume capacity for {target_name} to guarantee write headroom.",
@@ -388,6 +424,9 @@ def apply_feasible_solution(
 
     if not solution_data or not isinstance(solution_data, dict):
         raise ValueError(f"Unable to apply change: Invalid or empty configuration for feasible solution '{solution_id}'.")
+
+    if not solution_data.get("name") and solution_data.get("title"):
+        solution_data["name"] = solution_data["title"]
 
     # 1. Capture BEFORE state metrics
     before_components_count = db.query(models.Component).count()

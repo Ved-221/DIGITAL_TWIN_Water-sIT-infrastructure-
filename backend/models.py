@@ -1,5 +1,5 @@
-from sqlalchemy import Column, Integer, String, Enum, Float, ForeignKey, JSON
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, Enum, Float, ForeignKey, JSON, Boolean
+from sqlalchemy.orm import relationship, synonym
 import enum
 import uuid
 from datetime import datetime, timezone
@@ -20,12 +20,19 @@ class ComponentType(str, enum.Enum):
     subnet = "subnet"
     vpc = "vpc"
     security_group = "security_group"
+    gateway = "gateway"
+    lambda_ = "lambda"
 
 class EnvironmentEnum(str, enum.Enum):
     on_prem = "on_prem"
     cloud = "cloud"
     kubernetes = "kubernetes"
     hybrid = "hybrid"
+
+Environment = EnvironmentEnum
+
+def get_utc_now():
+    return datetime.now(timezone.utc).isoformat()
 
 class Criticality(str, enum.Enum):
     low = "low"
@@ -61,10 +68,10 @@ class Component(Base):
 
     id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
     name = Column(String, index=True)
-    type = Column(Enum(ComponentType))
-    environment = Column(Enum(Environment))
+    type = Column(Enum(ComponentType), default=ComponentType.server)
+    environment = Column(Enum(Environment), default=Environment.cloud)
     location = Column(String, default="ap-south-1")
-    criticality = Column(Enum(Criticality))
+    criticality = Column(Enum(Criticality), default=Criticality.medium)
     owner = Column(String)
     status = Column(Enum(Status), default=Status.active)
     cpu = Column(Float, nullable=True)
@@ -78,19 +85,129 @@ class Component(Base):
     updated_at = Column(String, nullable=True)
     metadata_col = Column(JSON, default={})
     source_environment = Column(String, default="aws")
+    domain = Column(String, default="general", nullable=True)
+    properties = Column(JSON, default={}, nullable=True)
     created_at = Column(String, default=get_utc_now)
     updated_at = Column(String, default=get_utc_now)
 
+    environment_id = synonym("source_environment")
+
     def __init__(self, **kwargs):
-        if "environment_id" in kwargs and "source_environment" not in kwargs:
-            kwargs["source_environment"] = kwargs["environment_id"]
-        elif "source_environment" in kwargs and "environment_id" not in kwargs:
-            kwargs["environment_id"] = kwargs["source_environment"]
-        if "location" in kwargs and "region" not in kwargs:
-            kwargs["region"] = kwargs["location"]
-        elif "region" in kwargs and "location" not in kwargs:
-            kwargs["location"] = kwargs["region"]
+        if kwargs.get("environment") is None:
+            kwargs["environment"] = Environment.cloud
+        if kwargs.get("criticality") is None:
+            kwargs["criticality"] = Criticality.medium
+        if kwargs.get("type") is None:
+            kwargs["type"] = ComponentType.server
+        if "environment_id" in kwargs:
+            env_val = kwargs.pop("environment_id")
+            if "source_environment" not in kwargs:
+                kwargs["source_environment"] = env_val
+        if "region" in kwargs:
+            reg_val = kwargs.pop("region")
+            if "location" not in kwargs:
+                kwargs["location"] = reg_val
+            if "aws_region" not in kwargs:
+                kwargs["aws_region"] = reg_val
+
+        provider_val = kwargs.pop("provider", None)
+        currency_val = kwargs.pop("currency", None)
+        pos_x = kwargs.pop("position_x", None)
+        pos_y = kwargs.pop("position_y", None)
+        telemetry_val = kwargs.pop("telemetry", None)
+
+        meta = kwargs.get("metadata_col") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        if provider_val:
+            meta["provider"] = provider_val
+        if currency_val:
+            meta["currency"] = currency_val
+        if pos_x is not None:
+            meta["position_x"] = pos_x
+        if pos_y is not None:
+            meta["position_y"] = pos_y
+        kwargs["metadata_col"] = meta
+
+        props = kwargs.get("properties") or {}
+        if not isinstance(props, dict):
+            props = {}
+        if telemetry_val:
+            props["telemetry"] = telemetry_val
+        kwargs["properties"] = props
+
         super().__init__(**kwargs)
+
+    @property
+    def provider(self):
+        return self.metadata_col.get("provider", "aws") if isinstance(self.metadata_col, dict) else "aws"
+
+    @provider.setter
+    def provider(self, val):
+        meta = dict(self.metadata_col or {})
+        meta["provider"] = val
+        self.metadata_col = meta
+
+    @property
+    def region(self):
+        return self.aws_region or self.location or "us-east-1"
+
+    @region.setter
+    def region(self, val):
+        self.aws_region = val
+        self.location = val
+
+    @property
+    def currency(self):
+        return self.metadata_col.get("currency", "USD") if isinstance(self.metadata_col, dict) else "USD"
+
+    @currency.setter
+    def currency(self, val):
+        meta = dict(self.metadata_col or {})
+        meta["currency"] = val
+        self.metadata_col = meta
+
+    @property
+    def position_x(self):
+        return self.metadata_col.get("position_x", 100) if isinstance(self.metadata_col, dict) else 100
+
+    @position_x.setter
+    def position_x(self, val):
+        meta = dict(self.metadata_col or {})
+        meta["position_x"] = val
+        self.metadata_col = meta
+
+    @property
+    def position_y(self):
+        return self.metadata_col.get("position_y", 100) if isinstance(self.metadata_col, dict) else 100
+
+    @position_y.setter
+    def position_y(self, val):
+        meta = dict(self.metadata_col or {})
+        meta["position_y"] = val
+        self.metadata_col = meta
+
+    @property
+    def telemetry(self):
+        return self.properties.get("telemetry", {}) if isinstance(self.properties, dict) else {}
+
+    @telemetry.setter
+    def telemetry(self, val):
+        props = dict(self.properties or {})
+        props["telemetry"] = val
+        self.properties = props
+
+    @property
+    def source(self):
+        return self.discovery_source or "manual"
+
+    @property
+    def source_id(self):
+        return self.arn or self.id
+
+    @property
+    def last_updated(self):
+        return self.updated_at
 
     @property
     def metadata_info(self):
@@ -121,6 +238,8 @@ class Dependency(Base):
     criticality = Column(Enum(Criticality), default=Criticality.medium)
     source = Column(String, default="aws_api")
     discovery_source = Column(String, default="aws_api")
+    source_environment = synonym("source")
+    environment_id = synonym("source")
     metadata_col = Column("metadata", JSON, default={})
 
     def __init__(self, **kwargs):
@@ -132,7 +251,11 @@ class Dependency(Base):
         kwargs["target_component_id"] = tgt
         kwargs["target_id"] = tgt
 
-        s = kwargs.get("source") or kwargs.get("discovery_source") or "manual"
+        if "environment_id" in kwargs:
+            env_val = kwargs.pop("environment_id")
+            if "source_environment" not in kwargs:
+                kwargs["source_environment"] = env_val
+        s = kwargs.get("source_environment") or kwargs.get("source") or kwargs.get("discovery_source") or "manual"
         kwargs["source"] = s
         kwargs["discovery_source"] = s
 
@@ -197,4 +320,88 @@ class TwinState(Base):
     discovery_summary = Column(JSON, default={})
     last_sync = Column(String, nullable=True)
     error = Column(String, nullable=True)
+
+class Environment(Base):
+    __tablename__ = "environments"
+
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String, index=True)
+    provider = Column(String, default="aws")
+    source_type = Column(String, default="aws")
+    is_active = Column(Boolean, default=True)
+    status = Column(String, default="connected")
+    created_at = Column(String, default=get_utc_now)
+
+    type = synonym("source_type")
+
+    # Enum compatibility
+    on_prem = EnvironmentEnum.on_prem
+    cloud = EnvironmentEnum.cloud
+    kubernetes = EnvironmentEnum.kubernetes
+    hybrid = EnvironmentEnum.hybrid
+
+    def __init__(self, **kwargs):
+        if "type" in kwargs and "source_type" not in kwargs:
+            kwargs["source_type"] = kwargs.pop("type")
+        super().__init__(**kwargs)
+
+class Simulation(Base):
+    __tablename__ = "simulations"
+
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    environment_id = Column(String, nullable=True)
+    source_environment = Column(String, default="aws")
+    target_component_id = Column(String, nullable=True)
+    action = Column(String, default="migrate")
+    destination_env = Column(String, nullable=True)
+    affected_components = Column(JSON, default=[])
+    risk_score = Column(Float, default=0.0)
+    risk_level = Column(String, default="LOW")
+    estimated_downtime_minutes = Column(Integer, default=0)
+    cost_delta_monthly = Column(Float, default=0.0)
+    status = Column(String, default="completed")
+    result_status = Column(String, default="completed")
+    created_at = Column(String, default=get_utc_now)
+
+    def __init__(self, **kwargs):
+        if "environment_id" in kwargs and "source_environment" not in kwargs:
+            kwargs["source_environment"] = kwargs["environment_id"]
+        elif "source_environment" in kwargs and "environment_id" not in kwargs:
+            kwargs["environment_id"] = kwargs["source_environment"]
+        if "component_id" in kwargs and "target_component_id" not in kwargs:
+            kwargs["target_component_id"] = kwargs["component_id"]
+        if "target_environment" in kwargs and "destination_env" not in kwargs:
+            kwargs["destination_env"] = kwargs["target_environment"]
+        if "result_status" in kwargs and "status" not in kwargs:
+            kwargs["status"] = kwargs["result_status"]
+        super().__init__(**kwargs)
+
+    @property
+    def component_id(self):
+        return self.target_component_id
+
+    @component_id.setter
+    def component_id(self, val):
+        self.target_component_id = val
+
+    @property
+    def target_environment(self):
+        return self.destination_env
+
+    @target_environment.setter
+    def target_environment(self, val):
+        self.destination_env = val
+
+class SandboxSnapshot(Base):
+    __tablename__ = "sandbox_snapshots"
+
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    environment_id = Column(String, index=True)
+    solution_id = Column(String, nullable=True)
+    solution_name = Column(String, nullable=True)
+    strategy_type = Column(String, nullable=True)
+    state_json = Column(JSON, default=dict)
+    status = Column(String, default="pending")
+    created_at = Column(String, default=get_utc_now)
+
 

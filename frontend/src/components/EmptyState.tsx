@@ -16,6 +16,7 @@ interface EmptyStateProps {
   onSelectAWS?: () => void;
   onSelectManual?: () => void;
   onAddResource?: () => void;
+  onOpenBuildTwin?: () => void;
   loading: boolean;
 }
 
@@ -31,6 +32,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
   onSelectAWS,
   onSelectManual,
   onAddResource,
+  onOpenBuildTwin,
   loading
 }) => {
   // 1. Loading / Discovering in progress
@@ -157,14 +159,23 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
             </p>
           </div>
 
-          <div className="space-y-3 pt-2">
+          <div className="flex flex-col sm:flex-row gap-3 pt-2">
             <button
               onClick={onAddResource || onStartManual}
-              className="w-full py-3.5 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 rounded-xl font-bold text-sm text-white shadow-lg shadow-blue-900/30 flex items-center justify-center gap-2 transition group"
+              className="flex-1 py-3.5 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 rounded-xl font-bold text-sm text-white shadow-lg shadow-blue-900/30 flex items-center justify-center gap-2 transition group"
             >
               <Plus size={18} />
               <span>+ Add Resource</span>
             </button>
+            {onOpenBuildTwin && (
+              <button
+                onClick={onOpenBuildTwin}
+                className="flex-1 py-3.5 bg-slate-850 hover:bg-slate-800 text-cyan-300 hover:text-white border border-slate-700/80 rounded-xl font-bold text-sm shadow-lg transition flex items-center justify-center gap-2"
+              >
+                <Sparkles size={18} className="text-cyan-400" />
+                <span>Describe System (NLP)</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -226,24 +237,24 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
           </p>
         </div>
 
-        {/* Two Options */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 pt-2 text-left">
+        {/* Three Options */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2 text-left">
           {/* Option 1: AWS Environment */}
-          <div className="p-6 rounded-2xl border border-blue-600/40 bg-slate-900/60 hover:border-blue-500/80 transition shadow-lg flex flex-col justify-between group">
+          <div className="p-5 rounded-2xl border border-blue-600/40 bg-slate-900/60 hover:border-blue-500/80 transition shadow-lg flex flex-col justify-between group">
             <div className="space-y-3">
               <div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400">
                 <Key size={20} />
               </div>
-              <h2 className="text-lg font-bold text-white">AWS Environment</h2>
+              <h2 className="text-base font-bold text-white">AWS Environment</h2>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Connect to your AWS environment and generate the Digital Twin from your actual infrastructure.
+                Connect your AWS account to discover real VPCs, EC2, RDS, and CloudWatch metrics.
               </p>
             </div>
-            <div className="pt-6">
+            <div className="pt-5">
               <button
                 onClick={onSelectAWS || onOpenConnect}
                 disabled={loading}
-                className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-xs text-white shadow-md shadow-blue-600/20 transition flex items-center justify-center gap-2 group-hover:shadow-blue-500/30"
+                className="w-full py-2.5 px-3 bg-blue-600 hover:bg-blue-500 rounded-xl font-bold text-xs text-white shadow-md shadow-blue-600/20 transition flex items-center justify-center gap-2 group-hover:shadow-blue-500/30"
               >
                 <span>Select AWS</span>
                 <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
@@ -252,23 +263,46 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
           </div>
 
           {/* Option 2: Manual Environment */}
-          <div className="p-6 rounded-2xl border border-cyan-600/40 bg-slate-900/60 hover:border-cyan-500/80 transition shadow-lg flex flex-col justify-between group">
+          <div className="p-5 rounded-2xl border border-cyan-600/40 bg-slate-900/60 hover:border-cyan-500/80 transition shadow-lg flex flex-col justify-between group">
             <div className="space-y-3">
               <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
                 <Server size={20} />
               </div>
-              <h2 className="text-lg font-bold text-white">Manual Environment</h2>
+              <h2 className="text-base font-bold text-white">Manual Builder</h2>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Create your own infrastructure topology manually.
+                Create custom infrastructure and connect dependencies node-by-node on a canvas.
               </p>
             </div>
-            <div className="pt-6">
+            <div className="pt-5">
               <button
                 onClick={onSelectManual || onStartManual}
                 disabled={loading}
-                className="w-full py-2.5 px-4 bg-cyan-600 hover:bg-cyan-500 rounded-xl font-bold text-xs text-white shadow-md shadow-cyan-600/20 transition flex items-center justify-center gap-2 group-hover:shadow-cyan-500/30"
+                className="w-full py-2.5 px-3 bg-cyan-600 hover:bg-cyan-500 rounded-xl font-bold text-xs text-white shadow-md shadow-cyan-600/20 transition flex items-center justify-center gap-2 group-hover:shadow-cyan-500/30"
               >
                 <span>Select Manual</span>
+                <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
+              </button>
+            </div>
+          </div>
+
+          {/* Option 3: Describe & Build Twin */}
+          <div className="p-5 rounded-2xl border border-indigo-600/40 bg-slate-900/60 hover:border-indigo-500/80 transition shadow-lg flex flex-col justify-between group">
+            <div className="space-y-3">
+              <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                <Sparkles size={20} />
+              </div>
+              <h2 className="text-base font-bold text-white">Describe & Build</h2>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Describe your system in English or import JSON to generate a domain-agnostic Twin.
+              </p>
+            </div>
+            <div className="pt-5">
+              <button
+                onClick={onOpenBuildTwin}
+                disabled={loading}
+                className="w-full py-2.5 px-3 bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 rounded-xl font-bold text-xs text-white shadow-md shadow-indigo-600/20 transition flex items-center justify-center gap-2 group-hover:shadow-indigo-500/30"
+              >
+                <span>Build Your Twin</span>
                 <ArrowRight size={14} className="group-hover:translate-x-0.5 transition-transform" />
               </button>
             </div>

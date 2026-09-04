@@ -45,13 +45,14 @@ def seed_data(db: Session):
         # Cloud/Edge
         {"id": "cloud_compute", "name": "AWS EC2 Cluster", "type": "cloud_resource", "environment": "cloud", "location": "AWS-us-east-1", "criticality": "high", "owner": "Cloud Ops", "cost_per_month": 4500.0},
         {"id": "cloud_s3", "name": "AWS S3 Data Lake", "type": "cloud_resource", "environment": "cloud", "location": "AWS-us-east-1", "criticality": "high", "owner": "Data Team", "cost_per_month": 1200.0},
-        {"id": "edge_gw", "name": "Edge Secure VPN Gateway", "type": "server", "environment": "on_prem", "location": "Edge-DC-01", "criticality": "high", "owner": "Network Engineering", "cost_per_month": 300.0},
         
         # Storage
         {"id": "sto_primary", "name": "Primary SAN", "type": "storage", "environment": "on_prem", "location": "US-East", "criticality": "critical", "owner": "Storage Team", "cost_per_month": 6000.0, "source_environment": "manual_waters"},
     ]
 
     for data in components_data:
+        data.setdefault("source_environment", "manual_waters")
+        data.setdefault("discovery_source", "manual_waters")
         comp = models.Component(**data)
         db.add(comp)
     db.commit()
@@ -103,8 +104,9 @@ def seed_data(db: Session):
             "target_id": data["target_id"],
             "relationship_type": data["relationship_type"],
             "criticality": data["criticality"],
-            "source": "seed",
-            "discovery_source": "seed",
+            "source": data.get("source_environment", "manual_waters"),
+            "source_environment": data.get("source_environment", "manual_waters"),
+            "discovery_source": "manual_waters",
             "metadata_col": {"origin": "enterprise_baseline"}
         }
         dep = models.Dependency(**dep_dict)
