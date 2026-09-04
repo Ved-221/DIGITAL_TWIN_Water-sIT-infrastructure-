@@ -1,136 +1,132 @@
 import pytest
-from tests.conftest import TestingSessionLocal
-from models import Component, Dependency, Simulation
-from simulation import build_graph, simulate_change
+import sys
+import os
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-def test_scoped_graph_construction():
-    """Verify build_graph only loads nodes and edges belonging to the specified source_environment."""
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+import models
+from database import Base
+from main import app, get_db
+import simulation
+
+TEST_DB_URL = "sqlite:///:memory:"
+test_engine = create_engine(
+    TEST_DB_URL,
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool
+)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+
+def override_get_db():
     db = TestingSessionLocal()
-    
-    # Environment A
-    cA1 = Component(name="app-a1", type="application", source_environment="env_a")
-    cA2 = Component(name="db-a2", type="database", source_environment="env_a")
-    db.add_all([cA1, cA2])
-    db.commit()
-    db.refresh(cA1)
-    db.refresh(cA2)
-    db.add(Dependency(source_id=cA1.id, target_id=cA2.id, source_environment="env_a"))
-    
-    # Environment B
-    cB1 = Component(name="app-b1", type="application", source_environment="env_b")
-    db.add(cB1)
-    db.commit()
-    
-    # Build graph for env_a
-    graph_a = build_graph(db, source_environment="env_a")
-    assert len(graph_a.nodes()) == 2
-    assert cA1.id in graph_a.nodes()
-    assert cA2.id in graph_a.nodes()
-    assert cB1.id not in graph_a.nodes()
-    assert len(graph_a.edges()) == 1
-    
-    # Build graph for env_b
-    graph_b = build_graph(db, source_environment="env_b")
-    assert len(graph_b.nodes()) == 1
-    assert cB1.id in graph_b.nodes()
-    assert len(graph_b.edges()) == 0
-    
-    db.close()
+    try:
+        yield db
+    finally:
+        db.close()
 
-def test_blast_radius_multi_hop_simulation():
-    """Verify simulate_change propagates failure downstream through multi-hop dependencies."""
+@pytest.fixture(autouse=True)
+def setup_test_db():
+    Base.metadata.create_all(bind=test_engine)
     db = TestingSessionLocal()
-    env = "sim_test_env"
-    
-    # Pipeline: Auth Service (Root) -> API Gateway (Hop 1) -> Payment Service (Hop 2) -> Ledger DB (Hop 3)
-    c_auth = Component(name="auth-service", type="application", criticality="critical", cost_per_month=100.0, source_environment=env)
-    c_gw = Component(name="api-gateway", type="server", criticality="high", cost_per_month=150.0, source_environment=env)
-    c_pay = Component(name="payment-service", type="application", criticality="critical", cost_per_month=200.0, source_environment=env)
-    c_db = Component(name="ledger-db", type="database", criticality="critical", cost_per_month=400.0, source_environment=env)
-    
-    db.add_all([c_auth, c_gw, c_pay, c_db])
-    db.commit()
-    for c in [c_auth, c_gw, c_pay, c_db]:
-        db.refresh(c)
-        
-    db.add(Dependency(source_id=c_auth.id, target_id=c_gw.id, criticality="critical", source_environment=env))
-    db.add(Dependency(source_id=c_gw.id, target_id=c_pay.id, criticality="critical", source_environment=env))
-    db.add(Dependency(source_id=c_pay.id, target_id=c_db.id, criticality="critical", source_environment=env))
-    db.commit()
-    
-    # Run failure simulation on auth-service
-    result = simulate_change(
-        db=db,
-        component_id=c_auth.id,
-        action="fail",
-        source_environment=env,
-        target_environment=None
-    )
-    
-    assert result.component_id == c_auth.id
-    assert result.action == "fail"
-    assert result.risk_level in ["CRITICAL", "HIGH"]
-    assert result.total_nodes_affected == 3
-    
-    # Check affected component IDs
-    affected_ids = [comp["id"] for comp in result.affected_components]
-    assert c_gw.id in affected_ids
-    assert c_pay.id in affected_ids
-    assert c_db.id in affected_ids
-    
-    # Check hop distances
-    hop_map = {comp["id"]: comp["hop_distance"] for comp in result.affected_components}
-    assert hop_map[c_gw.id] == 1
-    assert hop_map[c_pay.id] == 2
-    assert hop_map[c_db.id] == 3
-    
-    # Verify recommendations and feasible solutions generated
-    assert len(result.feasible_solutions) >= 1
-    assert len(result.recommendations) >= 1
-    
-    db.close()
+    import seed
+    seed.seed_data(db)
+    app.dependency_overrides[get_db] = override_get_db
+    yield
+    Base.metadata.drop_all(bind=test_engine)
+    app.dependency_overrides.pop(get_db, None)
 
-def test_simulation_persistence_and_history(client):
-    """Verify simulations are persisted to the database and can be queried via REST API."""
-    db = TestingSessionLocal()
-    env = "persist_env"
-    
-    node = Component(name="web-frontend", type="application", criticality="medium", cost_per_month=120.0, source_environment=env)
-    db.add(node)
-    db.commit()
-    db.refresh(node)
-    
-    # Simulate via API
-    sim_payload = {
-        "component_id": node.id,
+
+def test_simulation_manual_action():
+    """Verify simulation handles user-selected manual action and computes graph blast radius."""
+    client = TestClient(app)
+
+    payload = {
+        "target_component_id": "app_core_api",
         "action": "migrate",
-        "source_environment": env,
-        "target_environment": "cloud"
+        "destination_env": "cloud",
+        "use_ml_recommendation": False
     }
-    res = client.post("/api/twin/simulate", json=sim_payload)
+
+    res = client.post("/api/simulate", json=payload)
     assert res.status_code == 200
-    sim_data = res.json()
-    assert sim_data["action"] == "migrate"
-    assert "feasible_solutions" in sim_data
-    
-    # Check database persistence
-    saved_sims = db.query(Simulation).filter(Simulation.source_environment == env).all()
-    assert len(saved_sims) == 1
-    saved_sim = saved_sims[0]
-    assert saved_sim.component_id == node.id
-    assert saved_sim.action == "migrate"
-    assert saved_sim.target_environment == "cloud"
-    
-    # Check API history endpoints
-    hist_res = client.get(f"/api/simulations?source_environment={env}")
-    assert hist_res.status_code == 200
-    hist_data = hist_res.json()
-    assert len(hist_data) == 1
-    assert hist_data[0]["id"] == saved_sim.id
-    
-    detail_res = client.get(f"/api/simulations/{saved_sim.id}")
-    assert detail_res.status_code == 200
-    assert detail_res.json()["component_id"] == node.id
-    
-    db.close()
+    data = res.json()
+
+    assert "Core Microservices API" in data["target_component"]
+    assert data["action"] == "migrate"
+    assert data["change_action"] == "migrate"
+    assert data["blast_radius"] > 0
+    assert data["affected_count"] == data["blast_radius"]
+    assert len(data["affected_components"]) == data["blast_radius"]
+    assert 0 <= data["risk_score"] <= 100
+    assert data["estimated_downtime_minutes"] > 0
+    assert "critical_warnings" in data
+    assert "critical_flags" in data
+
+
+def test_simulation_ml_recommended_action():
+    """Verify simulation invokes ML recommendation engine, uses suggested action, and derives graph impact."""
+    client = TestClient(app)
+
+    payload = {
+        "target_component_id": "app_core_api",
+        "use_ml_recommendation": True
+    }
+
+    res = client.post("/api/simulate", json=payload)
+    assert res.status_code == 200
+    data = res.json()
+
+    assert "Core Microservices API" in data["target_component"]
+    assert data["recommended_action"] is not None
+    assert data["action"] == data["recommended_action"]
+    assert data["ml_confidence"] is not None
+    assert 0.0 <= data["ml_confidence"] <= 1.0
+    assert data["ml_reasoning_features"] is not None
+    assert len(data["ml_reasoning_features"]) > 0
+
+    # Graph determines blast radius
+    assert data["blast_radius"] > 0
+    assert len(data["affected_components"]) == data["blast_radius"]
+
+    # Simulation engine determines risk, downtime, cost
+    assert 0 <= data["risk_score"] <= 100
+    assert isinstance(data["risk_level"], str)
+    assert isinstance(data["estimated_downtime_minutes"], int)
+    assert "cost_impact" in data
+
+
+def test_simulation_numerical_calculations_are_deterministic():
+    """Verify that risk scores and downtimes are 100% deterministic and do not fluctuate."""
+    db = TestingSessionLocal()
+
+    res1 = simulation.simulate_change(
+        db=db,
+        target_component_id="srv_app_01",
+        change_action="SCALE_COMPUTE",
+        use_ml_recommendation=False
+    )
+
+    res2 = simulation.simulate_change(
+        db=db,
+        target_component_id="srv_app_01",
+        change_action="SCALE_COMPUTE",
+        use_ml_recommendation=False
+    )
+
+    assert res1["risk_score"] == res2["risk_score"]
+    assert res1["estimated_downtime_minutes"] == res2["estimated_downtime_minutes"]
+    assert res1["cost_impact"] == res2["cost_impact"]
+    assert res1["blast_radius"] == res2["blast_radius"]
+    assert set(res1["affected_components"]) == set(res2["affected_components"])
+
+
+def test_simulation_invalid_component():
+    """Verify 400 error is returned when an invalid component ID is simulated."""
+    client = TestClient(app)
+    res = client.post("/api/simulate", json={"target_component_id": "non_existent_id"})
+    assert res.status_code == 400

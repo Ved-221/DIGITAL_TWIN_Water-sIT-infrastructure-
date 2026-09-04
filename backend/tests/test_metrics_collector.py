@@ -1,137 +1,254 @@
 import pytest
-from unittest.mock import patch, MagicMock
-from botocore.exceptions import NoCredentialsError
+import sys
+import os
 
-import aws_mapper
-from aws_collector import check_aws_status, get_aws_region
-from cloudwatch_service import get_resource_health
-from config_rules_service import get_resource_compliance
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-def test_aws_resource_normalization():
-    """Verify raw AWS Config resource definitions are normalized into standard digital twin schemas."""
-    # 1. EC2 Instance
-    ec2_raw = {
-        "resource_id": "i-0123456789abcdef0",
-        "resource_type": "AWS::EC2::Instance",
-        "name": "prod-api-worker-1",
-        "region": "ap-south-1",
-        "status": "running",
-        "raw_configuration": {
-            "InstanceType": "t3.large",
-            "SubnetId": "subnet-0a1b2c3d",
-            "VpcId": "vpc-0987654321"
-        }
-    }
-    comp_ec2 = aws_mapper.resource_to_component(ec2_raw)
-    assert comp_ec2["id"] == "aws_ec2_instance_i-0123456789abcdef0"
-    assert comp_ec2["name"] == "prod-api-worker-1"
-    assert comp_ec2["type"] == "server"
-    assert comp_ec2["environment"] == "cloud"
-    assert comp_ec2["location"] == "ap-south-1"
-    assert comp_ec2["status"] == "active"
-    
-    # 2. RDS Database
-    rds_raw = {
-        "resource_id": "prod-postgres-cluster",
-        "resource_type": "AWS::RDS::DBInstance",
-        "name": "prod-postgres-cluster",
-        "region": "ap-south-1",
-        "status": "available",
-        "raw_configuration": {
-            "DBInstanceClass": "db.r6g.xlarge",
-            "DBSubnetGroup": {"VpcId": "vpc-0987654321"}
-        }
-    }
-    comp_rds = aws_mapper.resource_to_component(rds_raw)
-    assert comp_rds["id"] == "aws_rds_dbinstance_prod-postgres-cluster"
-    assert comp_rds["type"] == "database"
-    assert comp_rds["status"] == "active"
-    
-    # 3. VPC
-    vpc_raw = {
-        "resource_id": "vpc-0987654321",
-        "resource_type": "AWS::EC2::VPC",
-        "name": "prod-mumbai-vpc",
-        "region": "ap-south-1",
-        "status": "available",
-        "raw_configuration": {"CidrBlock": "10.0.0.0/16"}
-    }
-    comp_vpc = aws_mapper.resource_to_component(vpc_raw)
-    assert comp_vpc["type"] == "network"
-    assert comp_vpc["environment"] == "cloud"
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
-def test_aws_topology_dependency_extraction():
-    """Verify network and infrastructure relationships are extracted correctly."""
-    resources = [
+import models
+from database import Base
+import metrics_collector
+from main import app, get_db
+
+TEST_DB_URL = "sqlite:///:memory:"
+test_engine = create_engine(
+    TEST_DB_URL,
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool
+)
+TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
+
+def override_get_db():
+    db = TestingSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+@pytest.fixture(autouse=True)
+def setup_test_db():
+    Base.metadata.create_all(bind=test_engine)
+    db = TestingSessionLocal()
+    import seed
+    seed.seed_data(db)
+    app.dependency_overrides[get_db] = override_get_db
+    yield
+    Base.metadata.drop_all(bind=test_engine)
+    app.dependency_overrides.pop(get_db, None)
+
+
+def test_build_metric_queries_ec2():
+    """Verify EC2 queries request valid CloudWatch metrics and do NOT request unavailable OS memory."""
+    collector = metrics_collector.AWSMetricsCollector(region_name="us-east-1")
+    components = [
+        {"id": "i-09f182c81a2b", "type": "server", "metadata_col": {}}
+    ]
+    queries, qmap = collector.build_metric_queries(components)
+
+    metric_names = [q["MetricStat"]["Metric"]["MetricName"] for q in queries]
+    assert "CPUUtilization" in metric_names
+    assert "NetworkIn" in metric_names
+    assert "DiskReadBytes" in metric_names
+    assert "StatusCheckFailed" in metric_names
+    # Critical rule: Do NOT request OS memory from standard EC2 hypervisor CloudWatch
+    assert "MemoryUtilization" not in metric_names
+    assert len(queries) == 8
+
+
+def test_build_metric_queries_rds():
+    """Verify RDS queries request available metrics including FreeableMemory, FreeStorageSpace, Connections, and Latency."""
+    collector = metrics_collector.AWSMetricsCollector(region_name="us-east-1")
+    components = [
+        {"id": "rds-prod-analytics-db", "type": "database", "metadata_col": {"db_class": "db.m5.xlarge"}}
+    ]
+    queries, qmap = collector.build_metric_queries(components)
+
+    metric_names = [q["MetricStat"]["Metric"]["MetricName"] for q in queries]
+    assert "CPUUtilization" in metric_names
+    assert "FreeableMemory" in metric_names
+    assert "FreeStorageSpace" in metric_names
+    assert "DatabaseConnections" in metric_names
+    assert "ReadLatency" in metric_names
+    assert "WriteLatency" in metric_names
+    assert len(queries) == 10
+
+
+def test_build_metric_queries_alb():
+    """Verify ALB queries request RequestCount, TargetResponseTime, 5XX counts, ActiveConnections."""
+    collector = metrics_collector.AWSMetricsCollector(region_name="us-east-1")
+    components = [
         {
-            "resource_id": "vpc-100",
-            "resource_type": "AWS::EC2::VPC",
-            "name": "Main-VPC",
-            "raw_configuration": {}
-        },
-        {
-            "resource_id": "subnet-200",
-            "resource_type": "AWS::EC2::Subnet",
-            "name": "Private-Subnet-1A",
-            "raw_configuration": {
-                "VpcId": "vpc-100"
-            }
-        },
-        {
-            "resource_id": "i-300",
-            "resource_type": "AWS::EC2::Instance",
-            "name": "App-Server",
-            "raw_configuration": {
-                "VpcId": "vpc-100",
-                "SubnetId": "subnet-200"
-            }
+            "id": "alb-prod-ingress",
+            "type": "load_balancer",
+            "arn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/prod-alb/50dc6c495c0c9188"
         }
     ]
-    
-    deps = aws_mapper.extract_dependencies(resources)
-    assert len(deps) >= 2
-    
-    # Check Subnet -> VPC dependency
-    subnet_id = "aws_ec2_subnet_subnet-200"
-    vpc_id = "aws_ec2_vpc_vpc-100"
-    ec2_id = "aws_ec2_instance_i-300"
-    
-    subnet_vpc_dep = next((d for d in deps if d["source_id"] == subnet_id and d["target_id"] == vpc_id), None)
-    assert subnet_vpc_dep is not None
-    assert subnet_vpc_dep["relationship_type"] in ["contained_in", "depends_on"]
-    
-    # Check EC2 -> Subnet dependency
-    ec2_subnet_dep = next((d for d in deps if d["source_id"] == ec2_id and d["target_id"] == subnet_id), None)
-    assert ec2_subnet_dep is not None
-    assert ec2_subnet_dep["relationship_type"] in ["hosted_in", "connects_to"]
+    queries, qmap = collector.build_metric_queries(components)
 
-def test_aws_status_graceful_handling_without_credentials():
-    """Verify check_aws_status returns clean no_credentials or error status rather than throwing uncaught exceptions."""
-    with patch("boto3.Session") as mock_session_cls:
-        mock_session = MagicMock()
-        mock_client = MagicMock()
-        mock_client.describe_configuration_recorder_status.side_effect = NoCredentialsError()
-        mock_session.client.return_value = mock_client
-        mock_session_cls.return_value = mock_session
-        
-        status = check_aws_status(region="ap-south-1")
-        assert status["status"] in ["no_credentials", "error"]
-        assert status["config_recording"] is False
+    metric_names = [q["MetricStat"]["Metric"]["MetricName"] for q in queries]
+    assert "RequestCount" in metric_names
+    assert "TargetResponseTime" in metric_names
+    assert "HTTPCode_Target_5XX_Count" in metric_names
+    assert "ActiveConnectionCount" in metric_names
+    assert len(queries) == 6
 
-def test_cloudwatch_and_config_rules_services():
-    """Verify CloudWatch and Config Rules collectors return fallback or structured outputs gracefully."""
-    mock_comp = MagicMock()
-    mock_comp.id = "aws_ec2_instance_i-0123456789"
-    mock_comp.type = "server"
-    mock_comp.location = "us-east-1"
-    mock_comp.metadata_col = {"instanceId": "i-0123456789", "resource_type": "AWS::EC2::Instance", "resource_id": "i-0123456789"}
-    
-    # Test CloudWatch service without active AWS credentials
-    cw_metrics = get_resource_health(mock_comp)
-    assert "metrics" in cw_metrics
-    assert "alarms" in cw_metrics
-    
-    # Test Config Rules service without active AWS credentials
-    compliance = get_resource_compliance(mock_comp)
-    assert "status" in compliance
-    assert "rules" in compliance
+
+def test_normalize_ec2_metrics():
+    """Verify EC2 metrics are correctly normalized and memory remains None."""
+    collector = metrics_collector.AWSMetricsCollector(region_name="us-east-1")
+    comp = {
+        "id": "i-09f182c81a2b",
+        "type": "server",
+        "status": "active",
+        "metadata_col": {"launch_time": "2026-07-20T10:00:00Z"}
+    }
+    raw = {
+        "CPUUtilization": 35.5,
+        "NetworkIn": 300000.0,
+        "NetworkOut": 600000.0,
+        "DiskReadBytes": 150000.0,
+        "DiskWriteBytes": 300000.0,
+        "DiskReadOps": 60.0,
+        "DiskWriteOps": 120.0,
+        "StatusCheckFailed": 0.0
+    }
+    snapshot = collector.normalize_resource_metrics(comp, raw, period_seconds=300, timestamp_str="2026-09-03T12:00:00Z")
+
+    assert snapshot["resource_id"] == "i-09f182c81a2b"
+    assert snapshot["resource_type"] == "server"
+    assert snapshot["cpu"] == 35.5
+    assert snapshot["memory"] is None  # Authentic: EC2 hypervisor does not give RAM
+    assert snapshot["disk"]["read_bytes_sec"] == 500.0
+    assert snapshot["disk"]["write_bytes_sec"] == 1000.0
+    assert snapshot["network"]["in_bytes_sec"] == 1000.0
+    assert snapshot["network"]["out_bytes_sec"] == 2000.0
+    assert snapshot["latency"] is None
+    assert snapshot["error_rate"] is None
+    assert snapshot["status"] == "active"
+    assert snapshot["age_days"] is not None
+
+
+def test_normalize_rds_metrics():
+    """Verify RDS metrics calculate memory % and disk utilization % against allocated capacity."""
+    collector = metrics_collector.AWSMetricsCollector(region_name="us-east-1")
+    comp = {
+        "id": "rds-prod-analytics-db",
+        "type": "database",
+        "status": "active",
+        "metadata_col": {
+            "db_class": "db.m5.xlarge", # 16 GB total RAM
+            "allocated_storage_gb": 100
+        }
+    }
+    raw = {
+        "CPUUtilization": 24.2,
+        "FreeableMemory": 8 * (1024 ** 3), # 8 GB free -> 50% used
+        "FreeStorageSpace": 40 * (1024 ** 3), # 40 GB free of 100 GB -> 60% used
+        "DatabaseConnections": 15.0,
+        "ReadLatency": 0.002,
+        "WriteLatency": 0.004,
+        "ReadIOPS": 50.0,
+        "WriteIOPS": 120.0
+    }
+    snapshot = collector.normalize_resource_metrics(comp, raw, period_seconds=300, timestamp_str="2026-09-03T12:00:00Z")
+
+    assert snapshot["cpu"] == 24.2
+    assert snapshot["memory"] == 50.0 # 50% RAM utilization
+    assert snapshot["disk"]["utilization_pct"] == 60.0 # 60% storage utilization
+    assert snapshot["disk"]["read_iops"] == 50.0
+    assert snapshot["connections"] == 15.0
+    assert snapshot["latency"] == 0.003 # Average of 2ms + 4ms
+
+
+def test_normalize_alb_metrics():
+    """Verify ALB metrics calculate request rate, latency, and 5xx error rate."""
+    collector = metrics_collector.AWSMetricsCollector(region_name="us-east-1")
+    comp = {
+        "id": "alb-prod-ingress",
+        "type": "load_balancer",
+        "status": "active",
+        "metadata_col": {}
+    }
+    raw = {
+        "RequestCount": 30000.0,
+        "TargetResponseTime": 0.015,
+        "HTTPCode_Target_5XX_Count": 15.0,
+        "HTTPCode_ELB_5XX_Count": 0.0,
+        "ActiveConnectionCount": 42.0,
+        "ProcessedBytes": 60000000.0
+    }
+    snapshot = collector.normalize_resource_metrics(comp, raw, period_seconds=300, timestamp_str="2026-09-03T12:00:00Z")
+
+    assert snapshot["request_rate"] == 100.0 # 30000 / 300 = 100 req/s
+    assert snapshot["latency"] == 0.015 # 15ms
+    assert snapshot["error_rate"] == 0.05 # 15 / 30000 * 100 = 0.05%
+    assert snapshot["connections"] == 42.0
+    assert snapshot["cpu"] is None # Managed ALB has no CPU metric
+
+
+def test_missing_metrics_handled_gracefully():
+    """Verify that absent metrics are safely represented as None without exceptions."""
+    collector = metrics_collector.AWSMetricsCollector(region_name="us-east-1")
+    comp = {"id": "i-empty", "type": "server", "metadata_col": {}}
+    raw = {} # Empty CloudWatch response
+    snapshot = collector.normalize_resource_metrics(comp, raw, period_seconds=300, timestamp_str="2026-09-03T12:00:00Z")
+
+    assert snapshot["cpu"] is None
+    assert snapshot["memory"] is None
+    assert snapshot["disk"] is None
+    assert snapshot["network"] is None
+    assert snapshot["latency"] is None
+    assert snapshot["error_rate"] is None
+    assert snapshot["request_rate"] is None
+    assert snapshot["connections"] is None
+    assert snapshot["status"] == "active"
+
+
+def test_collect_and_store_metrics_db():
+    """Verify metrics collector saves records into SQLite and associates with components."""
+    db = TestingSessionLocal()
+    snapshots, source = metrics_collector.collect_and_store_metrics(db, use_synthetic=True)
+
+    assert len(snapshots) >= 1
+    assert source == "aws_synthetic_cloudwatch"
+
+    db_records = db.query(models.MetricSnapshot).all()
+    assert len(db_records) == len(snapshots)
+    assert db_records[0].resource_id is not None
+    assert db_records[0].timestamp is not None
+
+
+def test_api_metrics_endpoints():
+    """Verify /api/twin/metrics and /api/twin/metrics/{id} endpoints return structured data."""
+    client = TestClient(app)
+
+    # 1. Trigger collection
+    collect_res = client.post("/api/twin/metrics/collect", json={"use_synthetic": True, "period_seconds": 300})
+    assert collect_res.status_code == 200
+    cdata = collect_res.json()
+    assert cdata["success"] is True
+    assert cdata["metrics_collected"] > 0
+
+    # 2. Get latest metrics for all resources
+    latest_res = client.get("/api/twin/metrics")
+    assert latest_res.status_code == 200
+    metrics_list = latest_res.json()
+    assert len(metrics_list) > 0
+
+    sample = metrics_list[0]
+    assert "resource_id" in sample
+    assert "timestamp" in sample
+    assert "resource_type" in sample
+    assert "status" in sample
+
+    # 3. Get metrics for specific resource
+    target_id = sample["resource_id"]
+    detail_res = client.get(f"/api/twin/metrics/{target_id}")
+    assert detail_res.status_code == 200
+    detail_list = detail_res.json()
+    assert len(detail_list) >= 1
+    assert detail_list[0]["resource_id"] == target_id

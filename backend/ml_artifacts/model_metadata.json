@@ -1,0 +1,205 @@
+{
+  "model_type": "RandomForestClassifier",
+  "trained_at": "2026-09-04T05:40:44.015918+00:00",
+  "n_samples_total": 280,
+  "n_samples_train": 195,
+  "n_samples_val": 43,
+  "n_samples_test": 42,
+  "validation_macro_f1": 0.927,
+  "test_accuracy": 0.9048,
+  "test_macro_f1": 0.8929,
+  "classes": [
+    "NO_ACTION",
+    "SCALE_COMPUTE",
+    "EXPAND_STORAGE",
+    "INVESTIGATE_LATENCY_ERROR",
+    "INVESTIGATE_DATABASE_BOTTLENECK",
+    "OPTIMIZE_IDLE_RESOURCE",
+    "REDUNDANCY_RISK"
+  ],
+  "classification_report": {
+    "EXPAND_STORAGE": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 6.0
+    },
+    "INVESTIGATE_DATABASE_BOTTLENECK": {
+      "precision": 0.6,
+      "recall": 1.0,
+      "f1-score": 0.75,
+      "support": 6.0
+    },
+    "INVESTIGATE_LATENCY_ERROR": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 6.0
+    },
+    "NO_ACTION": {
+      "precision": 1.0,
+      "recall": 0.3333333333333333,
+      "f1-score": 0.5,
+      "support": 6.0
+    },
+    "OPTIMIZE_IDLE_RESOURCE": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 6.0
+    },
+    "REDUNDANCY_RISK": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 6.0
+    },
+    "SCALE_COMPUTE": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1-score": 1.0,
+      "support": 6.0
+    },
+    "accuracy": 0.9047619047619048,
+    "macro avg": {
+      "precision": 0.9428571428571428,
+      "recall": 0.9047619047619049,
+      "f1-score": 0.8928571428571429,
+      "support": 42.0
+    },
+    "weighted avg": {
+      "precision": 0.9428571428571428,
+      "recall": 0.9047619047619048,
+      "f1-score": 0.8928571428571429,
+      "support": 42.0
+    }
+  },
+  "confusion_matrix": [
+    [
+      2,
+      0,
+      0,
+      0,
+      4,
+      0,
+      0
+    ],
+    [
+      0,
+      6,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      6,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      6,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      6,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0,
+      6,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      6
+    ]
+  ],
+  "top_feature_importances": [
+    {
+      "feature": "disk_iops",
+      "importance": 0.1222
+    },
+    {
+      "feature": "cpu_utilization",
+      "importance": 0.104
+    },
+    {
+      "feature": "network_throughput_kb_s",
+      "importance": 0.1037
+    },
+    {
+      "feature": "is_active",
+      "importance": 0.0901
+    },
+    {
+      "feature": "disk_utilization_pct",
+      "importance": 0.0793
+    },
+    {
+      "feature": "request_rate",
+      "importance": 0.0579
+    },
+    {
+      "feature": "cpu_trend_1h",
+      "importance": 0.055
+    },
+    {
+      "feature": "cost_monthly",
+      "importance": 0.0519
+    },
+    {
+      "feature": "traffic_trend_1h",
+      "importance": 0.0476
+    },
+    {
+      "feature": "latency_ms",
+      "importance": 0.043
+    },
+    {
+      "feature": "error_rate_pct",
+      "importance": 0.0287
+    },
+    {
+      "feature": "connection_count",
+      "importance": 0.0276
+    },
+    {
+      "feature": "memory_utilization",
+      "importance": 0.0257
+    },
+    {
+      "feature": "dependent_count",
+      "importance": 0.0231
+    },
+    {
+      "feature": "cpu_utilization_is_missing",
+      "importance": 0.018
+    }
+  ],
+  "model_file": "/Users/admin/Documents/Digital_Twin/DIGITAL_TWIN_Water-sIT-infrastructure-/backend/ml_artifacts/recommendation_model.joblib"
+}

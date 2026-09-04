@@ -1,13 +1,75 @@
+# pyrefly: ignore [missing-import]
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List
+import os
+import logging
+from datetime import datetime, timezone
+
 from database import engine, Base, get_db
-import models, schemas, seed, simulation, migrations
+import models, schemas, seed, simulation, aws_collector, metrics_collector, feasibility_engine
+from ml import recommender, trainer
+# pyrefly: ignore [missing-import]
 from fastapi.middleware.cors import CORSMiddleware
 
-migrations.run_migrations(engine)
+# Configure application logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("infratwin.api")
 
-app = FastAPI(title="InfraTwin API")
+import database
+database.init_db()
+
+import time
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.start_time = time.time()
+    app.state.last_aws_sync = None
+    db = next(get_db())
+    data_source = os.environ.get("INFRATWIN_DATA_SOURCE", os.environ.get("DATA_SOURCE", "unconnected")).lower()
+    logger.info("Initializing InfraTwin with DATA_SOURCE=%s", data_source)
+
+    # Ensure twin_state row exists in SQLite
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    if not state:
+        state = models.TwinState(id=1, mode="unconnected", discovery_status="idle")
+        db.add(state)
+        db.commit()
+
+    if data_source == "demo":
+        logger.info("Explicit demo mode requested via environment. Populating synthetic AWS environment...")
+        aws_collector.sync_aws_to_db(db, mode="replace", use_synthetic=True)
+        app.state.last_aws_sync = datetime.now(timezone.utc).isoformat()
+    elif data_source == "aws":
+        auth_status = aws_collector.check_aws_credentials()
+        if auth_status["authenticated"]:
+            logger.info("Syncing live AWS infrastructure on startup...")
+            res = aws_collector.sync_aws_to_db(db, mode="replace")
+            app.state.last_aws_sync = datetime.now(timezone.utc).isoformat()
+            logger.info("AWS startup sync: %s", res.get("message"))
+        else:
+            logger.info("AWS credentials not configured. Starting in clean unconnected state.")
+            state.mode = "unconnected"
+            state.discovery_status = "idle"
+            db.commit()
+    else:
+        # Default: clean unconnected onboarding state (NO predefined fake nodes or automatic seeding)
+        logger.info("Starting InfraTwin in clean UNCONNECTED state. Awaiting user AWS connection.")
+        if state.mode == "unconnected":
+            # If unconnected, ensure DB has 0 components
+            if db.query(models.Component).count() > 0:
+                db.query(models.MetricSnapshot).delete(synchronize_session=False)
+                db.query(models.Dependency).delete(synchronize_session=False)
+                db.query(models.Component).delete(synchronize_session=False)
+                db.commit()
+
+    yield
+
+app = FastAPI(title="InfraTwin API - IT Infrastructure Digital Twin", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,11 +79,396 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-def startup_event():
-    migrations.run_migrations(engine)
-    db = next(get_db())
-    seed.seed_data(db)
+@app.get("/api/health", response_model=schemas.HealthResponse)
+def get_health(db: Session = Depends(get_db)):
+    """System health check, uptime, and data layer connectivity."""
+    start_t = getattr(app.state, "start_time", time.time())
+    uptime = round(time.time() - start_t, 2)
+    auth_info = aws_collector.check_aws_credentials()
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    mode = state.mode if state else "unconnected"
+    total_comps = db.query(models.Component).count()
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "uptime_seconds": uptime,
+        "database_connected": True,
+        "total_components": total_comps,
+        "aws_authenticated": auth_info["authenticated"],
+        "data_source": "aws_api" if (auth_info["authenticated"] and mode == "live") else mode
+    }
+
+@app.get("/api/twin/state", response_model=schemas.TwinStateResponse)
+def get_twin_state(db: Session = Depends(get_db)):
+    """
+    Returns current Digital Twin environment mode, discovery status, and AWS account info.
+    Guarantees the frontend accurately renders the active state without assuming predefined infrastructure.
+    """
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    auth_info = aws_collector.check_aws_credentials()
+    mode = state.mode if state else "unconnected"
+
+    if mode == "manual":
+        total_comps = db.query(models.Component).filter_by(discovery_source="manual").count()
+        total_deps = db.query(models.Dependency).filter_by(source="manual").count()
+    elif mode in ["live", "demo"]:
+        total_comps = db.query(models.Component).filter(models.Component.discovery_source.in_(["aws_api", "hybrid", "aws_synthetic", "proposed"])).count()
+        total_deps = db.query(models.Dependency).filter(models.Dependency.source.in_(["aws_api", "hybrid", "aws_synthetic", "proposed"])).count()
+    else:
+        total_comps = 0
+        total_deps = 0
+
+    if not state:
+        return {
+            "mode": mode,
+            "authenticated": auth_info["authenticated"] if mode == "live" else False,
+            "account_id": auth_info.get("account_id") if mode == "live" else None,
+            "arn": auth_info.get("arn") if mode == "live" else None,
+            "region": auth_info.get("region", "us-east-1") if mode == "live" else "us-east-1",
+            "discovery_status": "completed" if total_comps > 0 else "idle",
+            "discovery_summary": {},
+            "last_sync": getattr(app.state, "last_aws_sync", None) if mode == "live" else None,
+            "error": None,
+            "total_components": total_comps,
+            "total_dependencies": total_deps
+        }
+
+    return {
+        "mode": state.mode,
+        "authenticated": auth_info["authenticated"] if mode == "live" else False,
+        "account_id": (state.account_id or auth_info.get("account_id")) if mode == "live" else None,
+        "arn": (state.arn or auth_info.get("arn")) if mode == "live" else None,
+        "region": (state.region or auth_info.get("region", "us-east-1")) if mode == "live" else "us-east-1",
+        "discovery_status": state.discovery_status,
+        "discovery_summary": state.discovery_summary or {},
+        "last_sync": (state.last_sync or getattr(app.state, "last_aws_sync", None)) if mode == "live" else None,
+        "error": state.error,
+        "total_components": total_comps,
+        "total_dependencies": total_deps
+    }
+
+@app.post("/api/aws/connect", response_model=schemas.AWSConnectResponse)
+def connect_aws(request: schemas.AWSConnectRequest, db: Session = Depends(get_db)):
+    """
+    Dynamically validate and configure active AWS credentials for the Digital Twin.
+    Validates identity via STS GetCallerIdentity before activating the session.
+    Transitions Digital Twin to LIVE mode (Awaiting Discovery). Does NOT create premature nodes.
+    Preserves any manual infrastructure safely in the database.
+    """
+    res = aws_collector.set_active_aws_credentials(
+        access_key_id=request.access_key_id,
+        secret_access_key=request.secret_access_key,
+        session_token=request.session_token,
+        region=request.region
+    )
+    if res["authenticated"]:
+        # Update persistent TwinState: LIVE mode, awaiting explicit discovery
+        state = db.query(models.TwinState).filter_by(id=1).first()
+        if not state:
+            state = models.TwinState(id=1)
+            db.add(state)
+        state.mode = "live"
+        state.account_id = res.get("account_id")
+        state.arn = res.get("arn")
+        state.region = res.get("region", "us-east-1")
+        state.discovery_status = "idle" # Awaiting explicit discovery click
+        state.discovery_summary = {}
+        state.last_sync = None
+        state.error = None
+
+        # Clean prior AWS environment data to guarantee fresh discovery without touching manual resources
+        db.query(models.MetricSnapshot).delete(synchronize_session=False)
+        db.query(models.Dependency).filter(models.Dependency.source != "manual").delete(synchronize_session=False)
+        db.query(models.Component).filter(models.Component.discovery_source != "manual").delete(synchronize_session=False)
+        db.commit()
+        app.state.last_aws_sync = None
+
+        return {
+            "authenticated": True,
+            "account_id": res.get("account_id"),
+            "arn": res.get("arn"),
+            "region": res.get("region", "us-east-1"),
+            "message": f"Successfully authenticated as AWS Account {res.get('account_id')} ({res.get('arn')}). Ready for infrastructure discovery.",
+            "error": None
+        }
+    else:
+        return {
+            "authenticated": False,
+            "account_id": None,
+            "arn": None,
+            "region": request.region or "us-east-1",
+            "message": "AWS Authentication failed. Please check credentials and permissions.",
+            "error": res.get("error")
+        }
+
+@app.post("/api/twin/reset", response_model=schemas.TwinResetResponse)
+def reset_twin_environment(db: Session = Depends(get_db)):
+    """
+    Resets the active Digital Twin environment to clean unconnected state.
+    """
+    db.query(models.MetricSnapshot).delete(synchronize_session=False)
+    db.query(models.Dependency).delete(synchronize_session=False)
+    db.query(models.Component).delete(synchronize_session=False)
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    if not state:
+        state = models.TwinState(id=1)
+        db.add(state)
+    state.mode = "unconnected"
+    state.account_id = None
+    state.arn = None
+    state.region = "us-east-1"
+    state.discovery_status = "idle"
+    state.discovery_summary = {}
+    state.last_sync = None
+    state.error = None
+    db.commit()
+
+    aws_collector._ACTIVE_AWS_SESSION = None
+    app.state.last_aws_sync = None
+
+    return {
+        "success": True,
+        "message": "Digital Twin environment reset to clean unconnected state.",
+        "mode": "unconnected"
+    }
+
+@app.post("/api/twin/demo", response_model=schemas.AWSSyncResponse)
+def launch_demo_environment(request: schemas.TwinModeRequest = schemas.TwinModeRequest(), db: Session = Depends(get_db)):
+    """
+    Explicitly launches synthetic demo environment if invoked.
+    """
+    result = aws_collector.sync_aws_to_db(
+        db=db,
+        mode="replace",
+        use_synthetic=True,
+        region=request.region or "us-east-1"
+    )
+    app.state.last_aws_sync = datetime.now(timezone.utc).isoformat()
+    return result
+
+# ==========================================
+# MANUAL INFRASTRUCTURE BUILDER ENDPOINTS
+# ==========================================
+
+@app.post("/api/manual/start", response_model=schemas.ManualEnvironmentResponse)
+def start_manual_environment(db: Session = Depends(get_db)):
+    """
+    Activates the Manual Infrastructure Builder mode.
+    Starts with existing manual resources or an empty canvas (0 resources).
+    """
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    if not state:
+        state = models.TwinState(id=1)
+        db.add(state)
+    state.mode = "manual"
+    state.discovery_status = "completed"
+    state.error = None
+    db.commit()
+
+    total_comps = db.query(models.Component).filter_by(discovery_source="manual").count()
+    total_deps = db.query(models.Dependency).filter_by(source="manual").count()
+
+    return {
+        "success": True,
+        "message": "Manual Infrastructure Builder activated.",
+        "mode": "manual",
+        "total_components": total_comps,
+        "total_dependencies": total_deps
+    }
+
+@app.post("/api/manual/activate")
+def activate_manual_mode(db: Session = Depends(get_db)):
+    """Switch active view back to Manual Environment."""
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    if not state:
+        state = models.TwinState(id=1)
+        db.add(state)
+    state.mode = "manual"
+    db.commit()
+    return {"success": True, "mode": "manual"}
+
+@app.post("/api/aws/activate")
+def activate_aws_mode(db: Session = Depends(get_db)):
+    """Switch active view back to AWS Environment."""
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    if not state:
+        state = models.TwinState(id=1)
+        db.add(state)
+    state.mode = "live"
+    db.commit()
+    return {"success": True, "mode": "live"}
+
+@app.post("/api/manual/components", response_model=schemas.Component)
+def create_manual_component(request: schemas.ManualComponentCreate, db: Session = Depends(get_db)):
+    """
+    Dynamically creates and persists a manual infrastructure component.
+    """
+    import uuid
+    comp_id = request.id.strip() if request.id and request.id.strip() else f"{request.type.value}-{uuid.uuid4().hex[:6]}"
+    existing = db.query(models.Component).filter_by(id=comp_id).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Component with ID '{comp_id}' already exists.")
+
+    meta = dict(request.metadata or {})
+    if request.assumptions:
+        meta["assumptions"] = request.assumptions.model_dump()
+
+    comp = models.Component(
+        id=comp_id,
+        name=request.name.strip(),
+        type=request.type,
+        criticality=request.criticality or models.Criticality.medium,
+        environment=request.environment or models.Environment.cloud,
+        location=request.location or "us-east-1",
+        owner=request.owner or "Infrastructure Team",
+        cost_per_month=float(request.cost_per_month or 0.0),
+        discovery_source="manual",
+        cpu=request.assumptions.cpu if request.assumptions else None,
+        memory=request.assumptions.memory if request.assumptions else None,
+        metadata_col=meta,
+        updated_at=datetime.now(timezone.utc).isoformat()
+    )
+    db.add(comp)
+    db.commit()
+    db.refresh(comp)
+    return comp
+
+@app.put("/api/manual/components/{component_id}", response_model=schemas.Component)
+def update_manual_component(component_id: str, request: schemas.ManualComponentUpdate, db: Session = Depends(get_db)):
+    """
+    Updates properties of an existing manual infrastructure component.
+    """
+    comp = db.query(models.Component).filter_by(id=component_id, discovery_source="manual").first()
+    if not comp:
+        raise HTTPException(status_code=404, detail=f"Manual component '{component_id}' not found.")
+
+    if request.name is not None:
+        comp.name = request.name.strip()
+    if request.type is not None:
+        comp.type = request.type
+    if request.criticality is not None:
+        comp.criticality = request.criticality
+    if request.environment is not None:
+        comp.environment = request.environment
+    if request.location is not None:
+        comp.location = request.location
+    if request.owner is not None:
+        comp.owner = request.owner
+    if request.cost_per_month is not None:
+        comp.cost_per_month = float(request.cost_per_month)
+
+    meta = dict(comp.metadata_col or {})
+    if request.metadata is not None:
+        meta.update(request.metadata)
+    if request.assumptions is not None:
+        meta["assumptions"] = request.assumptions.model_dump()
+        comp.cpu = request.assumptions.cpu
+        comp.memory = request.assumptions.memory
+
+    comp.metadata_col = meta
+    comp.updated_at = datetime.now(timezone.utc).isoformat()
+    db.commit()
+    db.refresh(comp)
+    return comp
+
+@app.delete("/api/manual/components/{component_id}")
+def delete_manual_component(component_id: str, db: Session = Depends(get_db)):
+    """
+    Deletes a manual component and cleanly purges all its inbound and outbound dependency edges.
+    """
+    comp = db.query(models.Component).filter_by(id=component_id, discovery_source="manual").first()
+    if not comp:
+        raise HTTPException(status_code=404, detail=f"Manual component '{component_id}' not found.")
+
+    # Cascading delete of all dependencies linking to or from this component
+    db.query(models.Dependency).filter(
+        (models.Dependency.source_component_id == component_id) |
+        (models.Dependency.target_component_id == component_id) |
+        (models.Dependency.source_id == component_id) |
+        (models.Dependency.target_id == component_id)
+    ).delete(synchronize_session=False)
+
+    db.delete(comp)
+    db.commit()
+    return {"success": True, "message": f"Deleted manual component '{component_id}' and associated dependencies."}
+
+@app.post("/api/manual/dependencies", response_model=schemas.Dependency)
+def create_manual_dependency(request: schemas.ManualDependencyCreate, db: Session = Depends(get_db)):
+    """
+    Creates a user-defined dependency between two manual components.
+    """
+    import uuid
+    src_id = request.source_component_id
+    tgt_id = request.target_component_id
+
+    if src_id == tgt_id:
+        raise HTTPException(status_code=400, detail="Self-referencing dependencies (source == target) are not allowed.")
+
+    source_comp = db.query(models.Component).filter_by(id=src_id, discovery_source="manual").first()
+    target_comp = db.query(models.Component).filter_by(id=tgt_id, discovery_source="manual").first()
+    if not source_comp or not target_comp:
+        raise HTTPException(status_code=400, detail="Both source and target must be registered manual components.")
+
+    # Deduplicate existing edge
+    existing = db.query(models.Dependency).filter(
+        (
+            (models.Dependency.source_component_id == src_id) |
+            (models.Dependency.source_id == src_id)
+        ),
+        (
+            (models.Dependency.target_component_id == tgt_id) |
+            (models.Dependency.target_id == tgt_id)
+        ),
+        models.Dependency.relationship_type == request.relationship_type
+    ).first()
+    if existing:
+        return existing
+
+    dep_id = f"dep-{uuid.uuid4().hex[:8]}"
+    dep = models.Dependency(
+        id=dep_id,
+        source_component_id=src_id,
+        target_component_id=tgt_id,
+        relationship_type=request.relationship_type,
+        criticality=request.criticality or models.Criticality.medium,
+        source="manual",
+        discovery_source="manual",
+        metadata_col=request.metadata or {}
+    )
+    db.add(dep)
+    db.commit()
+    db.refresh(dep)
+    return dep
+
+@app.delete("/api/manual/dependencies/{dependency_id}")
+def delete_manual_dependency(dependency_id: str, db: Session = Depends(get_db)):
+    """
+    Deletes a user-defined dependency edge.
+    """
+    dep = db.query(models.Dependency).filter_by(id=dependency_id, source="manual").first()
+    if not dep:
+        raise HTTPException(status_code=404, detail=f"Manual dependency '{dependency_id}' not found.")
+    db.delete(dep)
+    db.commit()
+    return {"success": True, "message": f"Deleted manual dependency '{dependency_id}'."}
+
+@app.post("/api/manual/clear")
+def clear_manual_infrastructure(db: Session = Depends(get_db)):
+    """
+    Clears all manual components and dependencies without touching live AWS resources.
+    """
+    db.query(models.Dependency).filter_by(source="manual").delete(synchronize_session=False)
+    db.query(models.Component).filter_by(discovery_source="manual").delete(synchronize_session=False)
+    db.commit()
+    return {"success": True, "message": "Cleared all manual infrastructure."}
+
+@app.post("/api/aws/discover", response_model=schemas.AWSSyncResponse)
+def discover_aws(request: schemas.AWSSyncRequest = schemas.AWSSyncRequest(), db: Session = Depends(get_db)):
+    """
+    Triggers live AWS multi-resource discovery and generates the Digital Twin.
+    """
+    return sync_aws(request=schemas.AWSSyncRequest(mode="replace", use_synthetic=False, region=request.region), db=db)
+
 
 
 @app.get("/api/environments", response_model=List[schemas.EnvironmentSchema])
@@ -56,47 +503,25 @@ def delete_environment(env_id: str, db: Session = Depends(get_db)):
     return {"message": f"Environment '{env_id}' deleted successfully"}
 
 @app.get("/api/twin/components", response_model=List[schemas.Component])
-def get_components(source_environment: str = "aws", db: Session = Depends(get_db)):
-    if source_environment.startswith("aws_sim_"):
-        aws_comps = db.query(models.Component).filter(models.Component.source_environment == "aws").all()
-        sim_comps = db.query(models.Component).filter(models.Component.source_environment == source_environment).all()
-        return aws_comps + sim_comps
-    return db.query(models.Component).filter(models.Component.source_environment == source_environment).all()
-
-@app.patch("/api/twin/components/{component_id}/position")
-def update_component_position(component_id: str, pos: schemas.ComponentPositionUpdate, db: Session = Depends(get_db)):
-    comp = db.query(models.Component).filter(models.Component.id == component_id).first()
-    if not comp:
-        raise HTTPException(status_code=404, detail="Component not found")
-    comp.position_x = pos.position_x
-    comp.position_y = pos.position_y
-    db.commit()
-    db.refresh(comp)
-    return {
-        "status": "ok",
-        "id": comp.id,
-        "name": comp.name,
-        "type": comp.type,
-        "environment": comp.environment,
-        "position_x": comp.position_x,
-        "position_y": comp.position_y,
-        "source_environment": comp.source_environment
-    }
+def get_components(db: Session = Depends(get_db)):
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    if not state:
+        return db.query(models.Component).all()
+    mode = state.mode
+    if mode == "manual":
+        return db.query(models.Component).filter_by(discovery_source="manual").all()
+    elif mode in ["live", "demo"]:
+        return db.query(models.Component).filter(models.Component.discovery_source.in_(["aws_api", "hybrid", "aws_synthetic", "proposed"])).all()
+    return []
 
 @app.get("/api/twin/stats", response_model=schemas.TwinStats)
-def get_stats(source_environment: str = "aws", db: Session = Depends(get_db)):
-    if source_environment.startswith("aws_sim_"):
-        aws_comps = db.query(models.Component).filter(models.Component.source_environment == "aws").all()
-        sim_comps = db.query(models.Component).filter(models.Component.source_environment == source_environment).all()
-        components = aws_comps + sim_comps
-    else:
-        components = db.query(models.Component).filter(models.Component.source_environment == source_environment).all()
+def get_stats(db: Session = Depends(get_db)):
+    components = get_components(db=db)
     total = len(components)
-    critical = sum(1 for c in components if str(c.criticality).lower() == "critical")
-    cost = sum(float(c.cost_per_month or 0.0) for c in components)
-    on_prem = sum(1 for c in components if str(c.environment).lower() == "on_prem")
-    cloud = sum(1 for c in components if str(c.environment).lower() == "cloud")
-    currency = components[0].currency if components and hasattr(components[0], "currency") else "USD"
+    critical = sum(1 for c in components if c.criticality == "critical" or (hasattr(c.criticality, "value") and c.criticality.value == "critical"))
+    cost = sum(c.cost_per_month for c in components if c.cost_per_month)
+    on_prem = sum(1 for c in components if c.environment == "on_prem" or (hasattr(c.environment, "value") and c.environment.value == "on_prem"))
+    cloud = sum(1 for c in components if c.environment == "cloud" or (hasattr(c.environment, "value") and c.environment.value == "cloud"))
     return {
         "total_components": total,
         "critical_services_count": critical,
@@ -107,123 +532,73 @@ def get_stats(source_environment: str = "aws", db: Session = Depends(get_db)):
     }
 
 @app.get("/api/twin/dependencies", response_model=List[schemas.Dependency])
-def get_dependencies(source_environment: str = "aws", db: Session = Depends(get_db)):
-    if source_environment.startswith("aws_sim_"):
-        aws_deps = db.query(models.Dependency).filter(models.Dependency.source_environment == "aws").all()
-        sim_deps = db.query(models.Dependency).filter(models.Dependency.source_environment == source_environment).all()
-        return aws_deps + sim_deps
-    return db.query(models.Dependency).filter(models.Dependency.source_environment == source_environment).all()
+def get_dependencies(db: Session = Depends(get_db)):
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    if not state:
+        return db.query(models.Dependency).all()
+    mode = state.mode
+    if mode == "manual":
+        return db.query(models.Dependency).filter_by(source="manual").all()
+    elif mode in ["live", "demo"]:
+        return db.query(models.Dependency).filter(models.Dependency.source.in_(["aws_api", "hybrid", "aws_synthetic", "proposed"])).all()
+    return []
 
-@app.get("/api/twin/spof")
-def get_spofs(source_environment: str = "aws", db: Session = Depends(get_db)):
-    return simulation.find_spofs(db, source_environment)
-
-@app.get("/api/twin/health/{component_id}")
-def get_health(component_id: str, db: Session = Depends(get_db)):
-    comp = db.query(models.Component).filter(models.Component.id == component_id).first()
-    if not comp:
-        raise HTTPException(status_code=404, detail="Component not found")
-    
-    try:
-        import cloudwatch_service
-        return cloudwatch_service.get_resource_health(comp)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
-
-@app.get("/api/twin/compliance/{component_id}")
-def get_compliance(component_id: str, db: Session = Depends(get_db)):
-    comp = db.query(models.Component).filter(models.Component.id == component_id).first()
-    if not comp:
-        raise HTTPException(status_code=404, detail="Component not found")
-    
-    try:
-        import config_rules_service
-        return config_rules_service.get_resource_compliance(comp)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
-
-@app.get("/api/twin/components/{component_id}/impact")
-def get_component_impact(component_id: str, db: Session = Depends(get_db)):
-    comp = db.query(models.Component).filter(models.Component.id == component_id).first()
-    if not comp:
-        raise HTTPException(status_code=404, detail="Component not found")
-        
-    source_env = comp.source_environment or "aws"
-    G = simulation.build_graph(db, source_env)
-    if component_id not in G:
-        raise HTTPException(status_code=404, detail=f"Component '{component_id}' not found in graph")
-        
-    import networkx as nx
-    in_deg = G.in_degree(component_id)
-    out_deg = G.out_degree(component_id)
-    
-    direct_inbound = []
-    for u, v, data in G.in_edges(component_id, data=True):
-        direct_inbound.append({
-            "component_id": u,
-            "id": u,
-            "name": G.nodes[u].get("name", u),
-            "relationship_type": data.get("relationship_type", "depends_on"),
-            "criticality": data.get("criticality", "medium")
-        })
-        
-    direct_outbound = []
-    for u, v, data in G.out_edges(component_id, data=True):
-        direct_outbound.append({
-            "component_id": v,
-            "id": v,
-            "name": G.nodes[v].get("name", v),
-            "relationship_type": data.get("relationship_type", "depends_on"),
-            "criticality": data.get("criticality", "medium")
-        })
-        
-    ancestors = nx.ancestors(G, component_id)
-    upstream = []
-    for a in ancestors:
-        try:
-            hop = nx.shortest_path_length(G, source=a, target=component_id)
-        except Exception:
-            hop = 1
-        upstream.append({
-            "component_id": a,
-            "id": a,
-            "name": G.nodes[a].get("name", a),
-            "type": G.nodes[a].get("type", "server"),
-            "hop_distance": hop
-        })
-    upstream.sort(key=lambda x: x["hop_distance"])
-    
-    descendants = nx.descendants(G, component_id)
-    downstream = []
-    for d in descendants:
-        try:
-            hop = nx.shortest_path_length(G, source=component_id, target=d)
-        except Exception:
-            hop = 1
-        downstream.append({
-            "component_id": d,
-            "id": d,
-            "name": G.nodes[d].get("name", d),
-            "type": G.nodes[d].get("type", "server"),
-            "hop_distance": hop
-        })
-    downstream.sort(key=lambda x: x["hop_distance"])
-    
-    spofs = simulation.find_spofs(db, source_env)
-    is_spof = any(s["id"] == component_id for s in spofs)
-    
+@app.get("/api/aws/status", response_model=schemas.AWSStatusResponse)
+def get_aws_status(db: Session = Depends(get_db)):
+    """Check AWS connection status, active credentials, and resource counts."""
+    auth_info = aws_collector.check_aws_credentials()
+    state = db.query(models.TwinState).filter_by(id=1).first()
+    mode = state.mode if state else "unconnected"
+    aws_comps = db.query(models.Component).filter(models.Component.arn.isnot(None)).count()
+    total_comps = db.query(models.Component).count()
     return {
-        "component_id": component_id,
-        "in_degree": in_deg,
-        "out_degree": out_deg,
-        "direct_inbound_callers": direct_inbound,
-        "direct_outbound_targets": direct_outbound,
-        "upstream_dependents": upstream,
-        "upstream_impact_count": len(upstream),
-        "downstream_dependencies": downstream,
-        "downstream_dependency_count": len(downstream),
-        "is_spof": is_spof
+        "authenticated": auth_info["authenticated"],
+        "account_id": state.account_id if (state and state.account_id) else auth_info.get("account_id"),
+        "arn": state.arn if (state and state.arn) else auth_info.get("arn"),
+        "region": state.region if (state and state.region) else auth_info.get("region", "us-east-1"),
+        "configured_source": mode,
+        "last_sync": state.last_sync if (state and state.last_sync) else getattr(app.state, "last_aws_sync", None),
+        "aws_components_count": aws_comps,
+        "total_components_count": total_comps,
+        "error": auth_info.get("error")
     }
+
+@app.get("/api/aws/cost", response_model=schemas.AWSCostReport)
+def get_aws_cost_report():
+    """
+    Queries AWS Cost Explorer (ce:GetCostAndUsage) to report actual month-to-date
+    account spending across discovered AWS services.
+    """
+    session = aws_collector.get_boto3_session()
+    import cost_engine
+    return cost_engine.get_actual_cost_and_usage(session)
+
+@app.get("/api/aws/health-events", response_model=schemas.AWSHealthReport)
+def get_aws_health_events():
+    """
+    Queries AWS Health (health:DescribeEvents) to report active infrastructure alerts.
+    Requires global us-east-1 endpoint and AWS Business/Enterprise Support plan.
+    Never fabricates fake health data.
+    """
+    session = aws_collector.get_boto3_session()
+    return aws_collector.collect_health_events(session)
+
+@app.post("/api/aws/sync", response_model=schemas.AWSSyncResponse)
+def sync_aws(request: schemas.AWSSyncRequest = schemas.AWSSyncRequest(), db: Session = Depends(get_db)):
+    """
+    Trigger AWS infrastructure synchronization into the Digital Twin.
+    Supports mode='merge' (preserves on-prem data) or mode='replace'.
+    Supports use_synthetic=True for offline testing when credentials are not available.
+    """
+    result = aws_collector.sync_aws_to_db(
+        db=db,
+        mode=request.mode,
+        use_synthetic=request.use_synthetic,
+        region=request.region
+    )
+    if result.get("success"):
+        app.state.last_aws_sync = datetime.now(timezone.utc).isoformat()
+    return result
 
 @app.post("/api/simulate", response_model=schemas.SimulationResult)
 @app.post("/api/twin/simulate", response_model=schemas.SimulationResult)
@@ -243,289 +618,234 @@ def simulate(request: schemas.SimulationRequest, db: Session = Depends(get_db)):
                 source_env = "aws"
 
         result = simulation.simulate_change(
-            db=db,
-            target_component_id=target_id,
-            action=request.action,
-            destination_env=request.destination_env or request.target_environment,
-            source_environment=source_env,
-            use_ai=request.use_ai
+            db=db, 
+            target_component_id=request.target_component_id, 
+            change_action=request.action, 
+            destination_env=request.destination_env,
+            use_ml_recommendation=request.use_ml_recommendation
         )
         return result
     except Exception as e:
+        logger.error("Simulation error: %s", str(e))
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.get("/api/ml/metadata")
-def get_ml_metadata():
-    from ml.inference import get_model_metadata
-    return get_model_metadata()
-
-@app.post("/api/solutions/generate")
-def generate_solutions(request: schemas.SimulationRequest, db: Session = Depends(get_db)):
+@app.post("/api/feasible-solutions/generate", response_model=schemas.FeasibleSolutionsResponse)
+def generate_feasible_solutions_endpoint(
+    request: schemas.FeasibleSolutionsGenerateRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Dynamically generates candidate solutions for an identified infrastructure problem,
+    evaluating each via an in-memory clone sandbox simulation against operational constraints.
+    Returns only candidate options that are practically feasible.
+    """
     try:
-        import solution_generator
-        target_id = request.get_component_id()
-        source_env = request.source_environment or "aws"
-        comp = db.query(models.Component).filter(models.Component.id == target_id).first()
-        if not comp:
-            raise HTTPException(status_code=404, detail="Component not found")
-            
-        sim_res = simulation.simulate_change(db=db, target_component_id=target_id, action=request.action, source_environment=source_env, use_ai=False)
-        candidates = solution_generator.generate_applicable_candidates(component=comp, simulation_result=sim_res, currency=comp.currency or "USD")
-        return {"target_component_id": target_id, "candidates_count": len(candidates), "candidates": candidates}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/api/solutions/rank")
-def rank_solutions(request: schemas.SolutionRankRequest, db: Session = Depends(get_db)):
-    try:
-        from ml.inference import rank_candidate_solutions
-        sim_res = request.simulation_result
-        target_id = sim_res.get("target_component_id") or sim_res.get("component_id")
-        comp = db.query(models.Component).filter(models.Component.id == target_id).first() if target_id else None
-        candidates = request.candidate_solutions or sim_res.get("feasible_solutions", [])
-        ranked = rank_candidate_solutions(simulation_result=sim_res, candidate_solutions=candidates, component_data=comp.__dict__ if comp else None)
-        return {"ranked_solutions": ranked}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/api/solutions/apply")
-def apply_solution(request: schemas.SolutionApplyRequest, db: Session = Depends(get_db)):
-    try:
-        import solution_applicator
-        comparison = solution_applicator.apply_solution_to_sandbox(
+        sim_data = getattr(request, "current_simulation", None) or getattr(request, "simulation_result", None)
+        response = feasibility_engine.generate_feasible_solutions(
             db=db,
-            source_environment=request.source_environment,
             target_component_id=request.target_component_id,
-            solution=request.solution,
+            current_simulation=sim_data
+        )
+        return response
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Feasible solutions generation error: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Feasible solution evaluation error: {str(e)}")
+
+@app.post("/api/feasible-solutions/apply", response_model=schemas.ApplySolutionResponse)
+def apply_feasible_solution_endpoint(
+    request: schemas.ApplySolutionRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Applies the chosen feasible solution to the Digital Twin model.
+    In LIVE AWS mode: NEVER calls AWS APIs; updates the Digital Twin tagged as 'proposed'.
+    In MANUAL mode: Updates the user-defined Digital Twin topology model.
+    Returns authoritative before vs after metrics and Gemini architectural explanation.
+    """
+    try:
+        sol_data = request.solution_data or (request.solution.model_dump() if request.solution else {})
+        response = feasibility_engine.apply_feasible_solution(
+            db=db,
+            target_component_id=request.target_component_id,
             solution_id=request.solution_id,
-            solution_name=request.solution_name,
-            strategy_type=request.strategy_type,
-            action=request.action or "migrate"
+            solution_data=sol_data
         )
-        return comparison
-    except ValueError as ve:
-        raise HTTPException(status_code=404, detail=str(ve))
+        return response
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error("Apply feasible solution error: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Apply solution error: {str(e)}")
 
-@app.post("/api/solutions/accept")
-def accept_solution(request: schemas.SnapshotActionRequest, db: Session = Depends(get_db)):
+@app.get("/api/twin/metrics", response_model=List[schemas.MetricSnapshot])
+@app.get("/api/twin/metrics/latest", response_model=List[schemas.MetricSnapshot])
+def get_latest_metrics(db: Session = Depends(get_db)):
+    """
+    Returns the most recent metric snapshot for each component in the Digital Twin.
+    Strictly forbids falling back to synthetic metrics in LIVE AWS mode.
+    """
+    from sqlalchemy import func
+    subq = db.query(
+        models.MetricSnapshot.resource_id,
+        func.max(models.MetricSnapshot.timestamp).label("max_ts")
+    ).group_by(models.MetricSnapshot.resource_id).subquery()
+
+    latest = db.query(models.MetricSnapshot).join(
+        subq,
+        (models.MetricSnapshot.resource_id == subq.c.resource_id) &
+        (models.MetricSnapshot.timestamp == subq.c.max_ts)
+    ).all()
+
+    if not latest:
+        state = db.query(models.TwinState).filter_by(id=1).first()
+        auth_info = aws_collector.check_aws_credentials()
+        if state and state.mode == "demo":
+            snapshots, _ = metrics_collector.collect_and_store_metrics(db, use_synthetic=True)
+            return db.query(models.MetricSnapshot).all()
+        elif auth_info["authenticated"]:
+            # Query real CloudWatch (never synthetic)
+            snapshots, _ = metrics_collector.collect_and_store_metrics(db, use_synthetic=False)
+            return db.query(models.MetricSnapshot).all()
+        return []
+
+    return latest
+
+@app.get("/api/twin/metrics/{resource_id}", response_model=List[schemas.MetricSnapshot])
+def get_resource_metrics(resource_id: str, limit: int = 10, db: Session = Depends(get_db)):
+    """
+    Returns metric history for a specific resource, ordered by timestamp descending.
+    Strictly forbids falling back to synthetic metrics in LIVE AWS mode.
+    """
+    snaps = db.query(models.MetricSnapshot).filter_by(resource_id=resource_id)\
+        .order_by(models.MetricSnapshot.timestamp.desc()).limit(limit).all()
+    if not snaps:
+        comp = db.query(models.Component).filter_by(id=resource_id).first()
+        if not comp:
+            raise HTTPException(status_code=404, detail="Resource not found")
+        state = db.query(models.TwinState).filter_by(id=1).first()
+        auth_info = aws_collector.check_aws_credentials()
+        if state and state.mode == "demo":
+            metrics_collector.collect_and_store_metrics(db, use_synthetic=True)
+            snaps = db.query(models.MetricSnapshot).filter_by(resource_id=resource_id).all()
+        elif auth_info["authenticated"]:
+            metrics_collector.collect_and_store_metrics(db, use_synthetic=False)
+            snaps = db.query(models.MetricSnapshot).filter_by(resource_id=resource_id).all()
+
+    return snaps
+
+@app.get("/api/metrics/{resource_id}", response_model=List[schemas.MetricSnapshot])
+def get_metrics_standard_alias(resource_id: str, limit: int = 10, db: Session = Depends(get_db)):
+    """Standard endpoint alias: returns metric history for a specific resource."""
+    return get_resource_metrics(resource_id=resource_id, limit=limit, db=db)
+
+@app.post("/api/twin/metrics/collect", response_model=schemas.MetricsCollectResponse)
+def trigger_metrics_collection(
+    request: schemas.MetricsCollectRequest = schemas.MetricsCollectRequest(),
+    db: Session = Depends(get_db)
+):
+    """
+    Triggers an infrastructure performance metrics collection run (via CloudWatch or synthetic).
+    """
+    snapshots, data_source = metrics_collector.collect_and_store_metrics(
+        db=db,
+        use_synthetic=request.use_synthetic,
+        period_seconds=request.period_seconds,
+        region=request.region
+    )
+    now_str = datetime.now(timezone.utc).isoformat()
+    return {
+        "success": True,
+        "message": f"Successfully collected {len(snapshots)} resource metrics.",
+        "data_source": data_source,
+        "timestamp": now_str,
+        "metrics_collected": len(snapshots),
+        "snapshots": snapshots
+    }
+
+# ML Recommendation Engine Endpoints
+@app.get("/api/ml/recommend/{resource_id}", response_model=schemas.MLRecommendation)
+def get_resource_recommendation(resource_id: str, db: Session = Depends(get_db)):
+    """
+    Predicts the recommended operational action for a specific infrastructure component
+    using the trained Random Forest model.
+    """
     try:
-        import snapshot_manager
-        if request.snapshot_id:
-            res = snapshot_manager.accept_snapshot(db, request.snapshot_id)
-            return {"message": "Architecture change accepted and persisted.", **res}
-        return {"message": "Architecture change accepted."}
+        rec = recommender.predict_component_action(resource_id, db)
+        return rec
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error("Error generating recommendation for %s: %s", resource_id, str(e))
+        raise HTTPException(status_code=500, detail=f"ML inference error: {str(e)}")
 
-@app.post("/api/solutions/rollback")
-def rollback_solution(request: schemas.SnapshotActionRequest, db: Session = Depends(get_db)):
+@app.get("/api/recommendations/{resource_id}", response_model=schemas.MLRecommendation)
+def get_recommendation_standard_alias(resource_id: str, db: Session = Depends(get_db)):
+    """Standard endpoint alias: predicts recommendation for resource."""
+    return get_resource_recommendation(resource_id=resource_id, db=db)
+
+@app.get("/api/ml/recommendations", response_model=List[schemas.MLRecommendation])
+def get_all_recommendations(db: Session = Depends(get_db)):
+    """
+    Generates operational recommendations across all active infrastructure components.
+    """
     try:
-        import snapshot_manager
-        if not request.snapshot_id:
-            raise HTTPException(status_code=400, detail="Snapshot ID is required for rollback.")
-        res = snapshot_manager.restore_snapshot(db, request.snapshot_id)
-        
-        sim_res = None
-        if request.target_component_id and res.get("environment_id"):
-            sim_res = simulation.simulate_change(
-                db=db,
-                target_component_id=request.target_component_id,
-                action=request.action or "migrate",
-                source_environment=res["environment_id"],
-                use_ai=False
-            )
-            
+        recs = recommender.predict_all_components(db)
+        return recs
+    except Exception as e:
+        logger.error("Error generating recommendations: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"ML inference error: {str(e)}")
+
+@app.post("/api/ml/train", response_model=schemas.MLTrainResponse)
+def train_recommendation_model(samples_per_class: int = 250):
+    """
+    Retrains the RandomForest recommendation model on the SRE policy telemetry dataset
+    and reports held-out test evaluation metrics.
+    """
+    try:
+        _, metadata = trainer.train_and_evaluate(num_samples_per_class=samples_per_class)
+        recommender.reload_recommender_model()
         return {
-            "message": "Architecture change rejected. Sandbox restored to the previous state.",
-            "restored": True,
-            "environment_id": res.get("environment_id"),
-            "components_count": res.get("components_count"),
-            "dependencies_count": res.get("dependencies_count"),
-            "baseline_simulation": sim_res
+            "success": True,
+            "message": "Model successfully trained, evaluated on held-out test split, and persisted.",
+            "model_type": metadata["model_type"],
+            "trained_at": metadata["trained_at"],
+            "n_samples_total": metadata["n_samples_total"],
+            "validation_macro_f1": metadata["validation_macro_f1"],
+            "test_accuracy": metadata["test_accuracy"],
+            "test_macro_f1": metadata["test_macro_f1"],
+            "top_features": metadata.get("top_feature_importances", [])
         }
-    except ValueError as ve:
-        raise HTTPException(status_code=404, detail=str(ve))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error("Error during model training: %s", str(e))
+        raise HTTPException(status_code=500, detail=f"Training error: {str(e)}")
 
-@app.get("/api/twin/simulations", response_model=List[schemas.SimulationRecord])
-@app.get("/api/simulations", response_model=List[schemas.SimulationRecord])
-def get_simulations(source_environment: Optional[str] = None, db: Session = Depends(get_db)):
-    query = db.query(models.Simulation)
-    if source_environment:
-        query = query.filter(models.Simulation.source_environment == source_environment)
-    return query.order_by(models.Simulation.created_at.desc()).all()
-
-@app.get("/api/twin/simulations/{simulation_id}", response_model=schemas.SimulationRecord)
-@app.get("/api/simulations/{simulation_id}", response_model=schemas.SimulationRecord)
-def get_simulation_detail(simulation_id: str, db: Session = Depends(get_db)):
-    sim = db.query(models.Simulation).filter(models.Simulation.id == simulation_id).first()
-    if not sim:
-        raise HTTPException(status_code=404, detail="Simulation record not found")
-    return sim
-
-# Manual Project Endpoints
-
-@app.get("/api/manual/projects", response_model=List[schemas.ManualProject])
-def get_manual_projects(db: Session = Depends(get_db)):
-    return db.query(models.ManualProject).all()
-
-@app.post("/api/manual/projects", response_model=schemas.ManualProject)
-def create_manual_project(project: schemas.ManualProjectCreate, db: Session = Depends(get_db)):
-    db_proj = models.ManualProject(name=project.name)
-    db.add(db_proj)
-    db.commit()
-    db.refresh(db_proj)
-    return db_proj
-
-@app.delete("/api/manual/projects/{project_id}")
-def delete_manual_project(project_id: str, db: Session = Depends(get_db)):
-    db_proj = db.query(models.ManualProject).filter(models.ManualProject.id == project_id).first()
-    if not db_proj:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    # Delete associated components and dependencies
-    db.query(models.Dependency).filter(models.Dependency.source_environment == project_id).delete()
-    db.query(models.Component).filter(models.Component.source_environment == project_id).delete()
-    
-    db.delete(db_proj)
-    db.commit()
-    return {"message": "Deleted successfully"}
-
-@app.post("/api/manual/projects/{project_id}/push-to-aws")
-def push_to_aws(project_id: str, db: Session = Depends(get_db)):
-    db_proj = db.query(models.ManualProject).filter(models.ManualProject.id == project_id).first()
-    if not db_proj:
-        raise HTTPException(status_code=404, detail="Project not found")
-        
-    components = db.query(models.Component).filter(models.Component.source_environment == project_id).all()
-    dependencies = db.query(models.Dependency).filter(models.Dependency.source_environment == project_id).all()
-    
-    # Clear existing sandbox data
-    db.query(models.Dependency).filter(models.Dependency.source_environment == f"aws_sim_{project_id}").delete()
-    db.query(models.Component).filter(models.Component.source_environment == f"aws_sim_{project_id}").delete()
-    db.commit()
-    
-    id_mapping = {}
-    import uuid
-    for comp in components:
-        new_id = str(uuid.uuid4())
-        id_mapping[comp.id] = new_id
-        db_comp = models.Component(
-            id=new_id,
-            name=comp.name,
-            type=comp.type,
-            environment=comp.environment,
-            location=comp.location,
-            criticality=comp.criticality,
-            owner="Planned Deployment",
-            status=comp.status,
-            cpu=comp.cpu,
-            memory=comp.memory,
-            cost_per_month=comp.cost_per_month,
-            currency=comp.currency,
-            position_x=comp.position_x,
-            position_y=comp.position_y,
-            metadata_col=comp.metadata_col,
-            source_environment=f"aws_sim_{project_id}"
-        )
-        db.add(db_comp)
-        
-    for dep in dependencies:
-        new_source = id_mapping.get(dep.source_id, dep.source_id)
-        new_target = id_mapping.get(dep.target_id, dep.target_id)
-        db_dep = models.Dependency(
-            id=str(uuid.uuid4()),
-            source_id=new_source,
-            target_id=new_target,
-            relationship_type=dep.relationship_type,
-            criticality=dep.criticality,
-            source_environment=f"aws_sim_{project_id}"
-        )
-        db.add(db_dep)
-        
-    db.commit()
-    return {"message": "Pushed to AWS successfully", "cloned_components": len(components)}
-
-# Manual Environment Endpoints
-
-@app.post("/api/manual/components", response_model=schemas.Component)
-def create_manual_component(component: schemas.ComponentCreate, db: Session = Depends(get_db)):
-    db_comp = models.Component(**component.model_dump())
-    db.add(db_comp)
-    db.commit()
-    db.refresh(db_comp)
-    return db_comp
-
-@app.put("/api/manual/components/{component_id}", response_model=schemas.Component)
-def update_manual_component(component_id: str, component: schemas.ComponentCreate, db: Session = Depends(get_db)):
-    db_comp = db.query(models.Component).filter(models.Component.id == component_id).first()
-    if not db_comp or (db_comp.source_environment.startswith("aws") and db_comp.owner != "Planned Deployment"):
-        raise HTTPException(status_code=404, detail="Manual component not found")
-    
-    update_data = component.model_dump()
-    for key, value in update_data.items():
-        setattr(db_comp, key, value)
-    
-    db.commit()
-    db.refresh(db_comp)
-    return db_comp
-
-@app.delete("/api/manual/components/{component_id}")
-def delete_manual_component(component_id: str, db: Session = Depends(get_db)):
-    db_comp = db.query(models.Component).filter(models.Component.id == component_id).first()
-    if not db_comp or (db_comp.source_environment.startswith("aws") and db_comp.owner != "Planned Deployment"):
-        raise HTTPException(status_code=404, detail="Manual component not found")
-    
-    # Also delete related dependencies
-    db.query(models.Dependency).filter((models.Dependency.source_id == component_id) | (models.Dependency.target_id == component_id)).delete()
-    
-    db.delete(db_comp)
-    db.commit()
-    return {"message": "Deleted successfully"}
-
-@app.post("/api/manual/dependencies", response_model=schemas.Dependency)
-def create_manual_dependency(dependency: schemas.DependencyCreate, db: Session = Depends(get_db)):
-    if dependency.source_environment == "aws":
-        raise HTTPException(status_code=400, detail="Cannot manually create dependencies in default AWS environment")
-        
-    src = db.query(models.Component).filter(models.Component.id == dependency.source_id).first()
-    tgt = db.query(models.Component).filter(models.Component.id == dependency.target_id).first()
-    
-    if not src or not tgt:
-        raise HTTPException(status_code=404, detail="Source or target component not found")
-        
-    if src.source_environment != tgt.source_environment:
-        raise HTTPException(status_code=400, detail="Dependencies cannot cross across different environments")
-        
-    if dependency.source_environment and dependency.source_environment != src.source_environment:
-        raise HTTPException(status_code=400, detail="Dependencies cannot cross across different environments")
-        
-    dep_data = dependency.model_dump()
-    if not dep_data.get("source_environment"):
-        dep_data["source_environment"] = src.source_environment
-    if not dep_data.get("environment_id"):
-        dep_data["environment_id"] = src.source_environment
-        
-    db_dep = models.Dependency(**dep_data)
-    db.add(db_dep)
-    db.commit()
-    db.refresh(db_dep)
-    return db_dep
-
-@app.delete("/api/manual/dependencies/{dependency_id}")
-def delete_manual_dependency(dependency_id: str, db: Session = Depends(get_db)):
-    db_dep = db.query(models.Dependency).filter(models.Dependency.id == dependency_id).first()
-    if not db_dep or db_dep.source_environment == "aws":
-        raise HTTPException(status_code=404, detail="Manual dependency not found")
-    
-    db.delete(db_dep)
-    db.commit()
-    return {"message": "Deleted successfully"}
+@app.get("/api/ml/model/status", response_model=schemas.MLModelStatus)
+def get_model_status():
+    """
+    Returns current model training status, test macro F1 score, accuracy, and top feature importances.
+    """
+    try:
+        _, metadata = recommender.get_recommender_model()
+        return {
+            "is_trained": True,
+            "model_type": metadata.get("model_type", "RandomForestClassifier"),
+            "trained_at": metadata.get("trained_at"),
+            "test_macro_f1": metadata.get("test_macro_f1"),
+            "test_accuracy": metadata.get("test_accuracy"),
+            "classes": metadata.get("classes", []),
+            "top_features": metadata.get("top_feature_importances", [])
+        }
+    except Exception as e:
+        return {
+            "is_trained": False,
+            "model_type": "None",
+            "top_features": []
+        }
 
 if __name__ == "__main__":
-    import uvicorn
+    # pyrefly: ignore [missing-import]
+    import uvicorn 
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
