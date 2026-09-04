@@ -671,10 +671,10 @@ export default function App() {
 
             {/* Sidebar (Node Details) */}
             <div className={classNames(
-              "w-[450px] bg-[#1e293b] border-l border-slate-700 flex flex-col transition-transform shadow-2xl shrink-0 z-20",
-              selectedNode ? "translate-x-0" : "translate-x-full hidden"
+              "bg-[#1e293b] border-l border-slate-700 flex flex-col transition-all duration-300 shadow-2xl shrink-0 z-20",
+              selectedNode ? (simResult ? "w-[800px] translate-x-0" : "w-[450px] translate-x-0") : "w-[450px] translate-x-full hidden"
             )}>
-              <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-[#1e293b]">
+              <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-[#1e293b] shrink-0">
                 <h2 className="text-[11px] font-bold text-slate-300 uppercase tracking-widest flex items-center gap-2">
                   <Box size={14} className="text-blue-400" />
                   NODE DETAILS
@@ -684,7 +684,65 @@ export default function App() {
                 </button>
               </div>
               
-              <div className="flex-1 overflow-y-auto p-5 space-y-6">
+              <div className="flex-1 overflow-hidden flex">
+                
+                {/* LEFT COLUMN: AGENT SUMMARY */}
+                {simResult && (
+                  <div className="w-[280px] bg-[#0f172a]/60 border-r border-slate-700 overflow-y-auto p-5 shrink-0 flex flex-col gap-6">
+                    <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">AGENT SUMMARY</h3>
+                    
+                    {/* Financial Analyst */}
+                    <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4 shadow-sm">
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className="text-lg">💰</span>
+                        <span className="text-sm font-bold text-white">Financial Analyst</span>
+                      </div>
+                      <div className="flex flex-col gap-1 pl-8">
+                         <span className={classNames("text-xs font-bold", simResult.cost_delta_monthly <= 0 ? 'text-emerald-400' : 'text-yellow-400')}>
+                           {simResult.cost_delta_monthly <= 0 ? '✓ Favorable' : '⚠ Caution'}
+                         </span>
+                         <span className="text-xs text-slate-400 leading-tight">
+                           {simResult.cost_delta_monthly <= 0 ? 'Cost impact is low' : 'Increases monthly run rate'}
+                         </span>
+                      </div>
+                    </div>
+
+                    {/* Risk Analyst */}
+                    <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4 shadow-sm">
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className="text-lg">🛡️</span>
+                        <span className="text-sm font-bold text-white">Risk Analyst</span>
+                      </div>
+                      <div className="flex flex-col gap-1 pl-8">
+                         <span className={classNames("text-xs font-bold", simResult.risk_level === 'High' ? 'text-red-400' : simResult.risk_level === 'Medium' ? 'text-yellow-400' : 'text-emerald-400')}>
+                           {simResult.risk_level === 'High' ? '✕ High Risk' : simResult.risk_level === 'Medium' ? '⚠ Caution' : '✓ Favorable'}
+                         </span>
+                         <span className="text-xs text-slate-400 leading-tight">
+                           {simResult.estimated_downtime_minutes} min downtime
+                         </span>
+                      </div>
+                    </div>
+
+                    {/* AI Cloud Architect */}
+                    <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4 shadow-sm">
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className="text-lg">☁️</span>
+                        <span className="text-sm font-bold text-white">AI Cloud Architect</span>
+                      </div>
+                      <div className="flex flex-col gap-1 pl-8">
+                         <span className={classNames("text-xs font-bold", simResult.risk_level === 'High' || simResult.risk_score > 70 ? 'text-red-400' : simResult.risk_level === 'Medium' ? 'text-yellow-400' : 'text-emerald-400')}>
+                           {simResult.risk_level === 'High' || simResult.risk_score > 70 ? '✕ Blocked' : simResult.risk_level === 'Medium' ? '⚠ Conditional' : '✓ Approved'}
+                         </span>
+                         <span className="text-xs text-slate-400 leading-tight">
+                           {simResult.risk_level === 'High' || simResult.risk_score > 70 ? 'Migration not recommended' : simResult.risk_level === 'Medium' ? 'Phased migration' : 'Ready for migration'}
+                         </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* RIGHT COLUMN: MAIN CONTENT */}
+                <div className="flex-1 overflow-y-auto p-6 space-y-8">
                 
                 {/* Info Sandbox */}
                 {!selectedEnv?.startsWith('aws') && (
@@ -796,101 +854,97 @@ export default function App() {
 
                 <hr className="border-slate-700/60" />
 
-                {/* 3. SIMULATED IMPACT */}
+                {/* 3. SIMULATED IMPACT / DECISION */}
                 <div className="pb-8">
                   <div className="flex justify-between items-center mb-4">
                     <span className="bg-orange-900/40 text-orange-400 border border-orange-800/50 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
                       <Activity size={12} />
-                      3. SIMULATED IMPACT
+                      {simResult ? "3. MIGRATION DECISION" : "3. SIMULATED IMPACT"}
                     </span>
                     <span className="text-[10px] font-bold text-orange-400 uppercase tracking-wider">Deterministic Engine</span>
                   </div>
                   
-                  <div className="space-y-3">
-                    <button onClick={() => handleSimulate(true)} disabled={simulating} className="w-full bg-purple-600 hover:bg-purple-500 text-white py-3 rounded font-semibold text-sm flex justify-center items-center gap-2 transition border border-purple-500/30">
-                      {simulating ? <Activity className="animate-spin" size={16} /> : <span className="text-lg">✨</span>}
-                      Simulate ML Recommendation
-                    </button>
-                    <button onClick={() => handleSimulate(false)} disabled={simulating} className="w-full bg-slate-700 hover:bg-slate-600 text-white py-3 rounded font-semibold text-sm transition flex justify-center items-center gap-2">
-                      {simulating ? <Activity className="animate-spin" size={16} /> : null}
-                      Simulate Migration (Manual)
-                    </button>
-                  </div>
-
-                  {simResult && (
-                    <div className="mt-6 space-y-4">
-                      {/* Results layout similar to references image 1 */}
-                      <div className="bg-[#0f172a]/80 border border-slate-700 p-4 rounded-lg">
-                        <h4 className="text-sm font-semibold text-red-400 mb-2">5. Important risks:</h4>
-                        <p className="text-xs text-slate-300 leading-relaxed">
-                          Evaluated risk level is {simResult.risk_level} (risk score: {simResult.risk_score}/100). 
-                          {simResult.critical_flags?.length === 0 ? " No critical single-point-of-failure hazards were flagged." : " Critical hazards flagged."}
-                        </p>
+                  {!simResult ? (
+                    <div className="space-y-3">
+                      <button onClick={() => handleSimulate(true)} disabled={simulating} className="w-full bg-purple-600 hover:bg-purple-500 text-white py-3 rounded font-semibold text-sm flex justify-center items-center gap-2 transition border border-purple-500/30">
+                        {simulating ? <Activity className="animate-spin" size={16} /> : <span className="text-lg">✨</span>}
+                        Simulate Migration (AI Architect)
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="mt-4 space-y-6">
+                      <div className="bg-[#0f172a]/80 border border-slate-700 p-5 rounded-lg">
+                        <h3 className={classNames(
+                          "text-lg font-bold mb-4 uppercase tracking-wider",
+                          (simResult.risk_level === 'High' || simResult.risk_score > 70) ? 'text-red-400' : simResult.risk_level === 'Medium' ? 'text-yellow-400' : 'text-emerald-400'
+                        )}>
+                          {(simResult.risk_level === 'High' || simResult.risk_score > 70) ? 'MIGRATION BLOCKED' : simResult.risk_level === 'Medium' ? 'CONDITIONAL APPROVAL' : 'APPROVAL GRANTED'}
+                        </h3>
+                        
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <div className="text-[10px] text-slate-500 uppercase font-bold mb-1 tracking-wider">Key Metrics</div>
+                            <div className="text-xs text-slate-300 space-y-1">
+                              <div>Cost: ${selectedNode.cost_per_month} <span className={simResult.cost_delta_monthly > 0 ? "text-yellow-400" : "text-emerald-400"}>{simResult.cost_delta_monthly > 0 ? '+' : ''}${simResult.cost_delta_monthly}</span></div>
+                              <div>Downtime: {simResult.estimated_downtime_minutes}m</div>
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] text-slate-500 uppercase font-bold mb-1 tracking-wider">Risk Overview</div>
+                            <div className="text-xs text-slate-300">
+                              <span className={simResult.risk_level === 'High' ? 'text-red-400 font-bold' : simResult.risk_level === 'Medium' ? 'text-yellow-400 font-bold' : 'text-emerald-400 font-bold'}>{simResult.risk_level} Risk</span>
+                              <div>{simResult.affected_count} Components</div>
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                      
-                      <div className="bg-[#0f172a]/80 border border-slate-700 p-4 rounded-lg">
-                        <h4 className="text-sm font-semibold text-purple-400 mb-2">6. Engineer pre-change checklist:</h4>
-                        <ul className="text-xs text-slate-300 space-y-2 list-disc pl-4">
-                          <li>Pre-change verification: Confirm health check status for {selectedNode.name}.</li>
-                          <li>Maintenance window: Coordinate execution during off-peak traffic hours to safeguard the {simResult.affected_count} affected component(s).</li>
-                          <li>Rollback plan: Ensure automated or documented rollback procedures are validated before applying 'migrate'.</li>
-                          <li>Downtime window: Prepare client notification for the anticipated {simResult.estimated_downtime_minutes}-minute service interruption.</li>
+
+                      <div className="bg-[#0f172a]/80 border border-blue-900/50 p-5 rounded-lg">
+                        <h4 className="text-sm font-bold text-white uppercase tracking-wider mb-4 flex items-center gap-2">
+                          <span className="text-purple-400 text-lg">✨</span> ARCHITECT'S RECOMMENDATION
+                        </h4>
+                        
+                        <div className="text-sm text-slate-200 font-medium mb-4">
+                           Proceed with {simResult.risk_level === 'High' ? 'extreme caution' : simResult.risk_level === 'Medium' ? 'phased migration' : 'standard migration'}
+                        </div>
+                        
+                        <div className="text-[10px] text-slate-500 uppercase font-bold mb-1 tracking-wider">Why</div>
+                        <p className="text-xs text-slate-400 leading-relaxed mb-6">
+                          {simResult.architect_recommendation || simResult.ai_explanation || `Action 'migrate' initiated for change impact simulation. Impacts ${simResult.affected_count} components with a risk score of ${simResult.risk_score}/100.`}
+                        </p>
+
+                        <div className="text-[10px] text-slate-500 uppercase font-bold mb-3 tracking-wider">Recommended Actions</div>
+                        <ul className="text-xs text-slate-300 space-y-3">
+                          {simResult.recommended_actions && simResult.recommended_actions.length > 0 ? (
+                            simResult.recommended_actions.map((action: string, idx: number) => (
+                              <li key={idx} className="flex gap-3 items-start">
+                                <span className="text-blue-400 font-mono text-[10px] mt-0.5">0{idx+1}</span>
+                                <span className="leading-relaxed">{action}</span>
+                              </li>
+                            ))
+                          ) : simResult.critical_flags && simResult.critical_flags.length > 0 ? (
+                            simResult.critical_flags.map((flag: string, idx: number) => (
+                              <li key={idx} className="flex gap-3 items-start">
+                                <span className="text-blue-400 font-mono text-[10px] mt-0.5">0{idx+1}</span>
+                                <span className="leading-relaxed">{flag}</span>
+                              </li>
+                            ))
+                          ) : (
+                            <>
+                              <li className="flex gap-3 items-start"><span className="text-blue-400 font-mono text-[10px] mt-0.5">01</span><span className="leading-relaxed">Pre-change verification: Confirm health check status for {selectedNode.name}.</span></li>
+                              <li className="flex gap-3 items-start"><span className="text-blue-400 font-mono text-[10px] mt-0.5">02</span><span className="leading-relaxed">Maintenance window: Coordinate execution during off-peak traffic hours to safeguard the {simResult.affected_count} affected component(s).</span></li>
+                              <li className="flex gap-3 items-start"><span className="text-blue-400 font-mono text-[10px] mt-0.5">03</span><span className="leading-relaxed">Rollback plan: Ensure automated or documented rollback procedures are validated before applying 'migrate'.</span></li>
+                              <li className="flex gap-3 items-start"><span className="text-blue-400 font-mono text-[10px] mt-0.5">04</span><span className="leading-relaxed">Downtime window: Prepare client notification for the anticipated {simResult.estimated_downtime_minutes}-minute service interruption.</span></li>
+                            </>
+                          )}
                         </ul>
                       </div>
-
-                      <div className="bg-[#0f172a]/80 border border-blue-900/50 p-4 rounded-lg">
-                        <h4 className="text-sm font-semibold text-white mb-3">Architect Executive Summary:</h4>
-                        <div className="text-xs text-slate-300 space-y-2">
-                          <p>Recommended Action: <span className="text-white">migrate</span></p>
-                          <p>Why: Action 'migrate' was manually initiated for change impact simulation against the manually created infrastructure topology.</p>
-                          <p>Impact: {simResult.affected_count} downstream/upstream component(s) affected.</p>
-                          <p>Risk: <span className="text-white">{simResult.risk_level} ({simResult.risk_score}/100)</span></p>
-                          <p>Warnings: {simResult.critical_flags?.length > 0 ? simResult.critical_flags.join(', ') : 'None'}</p>
-                        </div>
-                      </div>
-
-                      <div className="mt-6">
-                        <div className="flex justify-between items-center mb-3">
-                          <span className="bg-teal-900/40 text-teal-400 border border-teal-800/50 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
-                            <Activity size={12} />
-                            5. FEASIBLE SOLUTIONS
-                          </span>
-                          <span className="text-[10px] font-bold text-teal-400 uppercase tracking-wider">Candidate Evaluation</span>
-                        </div>
-                        {simResult.financial_analysis ? (
-                          <div className="space-y-4">
-                            <div className="bg-[#0f172a]/80 border border-slate-700 p-4 rounded-lg">
-                              <h4 className="text-sm font-semibold text-teal-400 mb-2 flex items-center gap-2">
-                                <DollarSign size={16} /> Financial Analyst
-                              </h4>
-                              <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">{simResult.financial_analysis}</p>
-                            </div>
-                            <div className="bg-[#0f172a]/80 border border-slate-700 p-4 rounded-lg">
-                              <h4 className="text-sm font-semibold text-red-400 mb-2 flex items-center gap-2">
-                                <ShieldAlert size={16} /> Risk Analyst
-                              </h4>
-                              <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">{simResult.risk_analysis}</p>
-                            </div>
-                            <div className="bg-[#0f172a]/80 border border-blue-900/50 p-4 rounded-lg">
-                              <h4 className="text-sm font-semibold text-blue-400 mb-2 flex items-center gap-2">
-                                <Box size={16} /> AI Cloud Architect
-                              </h4>
-                              <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">{simResult.architect_recommendation}</p>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="bg-slate-900/50 border border-slate-800 p-3 rounded text-xs text-slate-500 flex items-center gap-2">
-                            <Info size={14} /> AI Recommendation not requested. Run ML Simulation to view.
-                          </div>
-                        )}
-                      </div>
-
                     </div>
                   )}
                 </div>
-
               </div>
             </div>
+          </div>
           </>
         )}
       </main>

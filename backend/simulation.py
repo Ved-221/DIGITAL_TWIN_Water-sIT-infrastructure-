@@ -119,6 +119,7 @@ def simulate_change(db: Session, target_component_id: str, change_action: str, d
         "destination": destination_env,
         "affected_count": len(affected_components),
         "affected_components": list(affected_components),
+        "affected_component_names": [G.nodes[c]["name"] for c in affected_components],
         "risk_score": min(risk_score, 100),
         "risk_level": risk_level,
         "estimated_downtime_minutes": downtime_min,
@@ -140,5 +141,6 @@ def simulate_change(db: Session, target_component_id: str, change_action: str, d
         result["financial_analysis"] = agent_reports.get("financial", "Financial Analysis unavailable.")
         result["risk_analysis"] = agent_reports.get("risk", "Risk Analysis unavailable.")
         result["architect_recommendation"] = agent_reports.get("architect", "Recommendation unavailable.")
+        result["recommended_actions"] = agent_reports.get("recommended_actions", [])
     
     return result

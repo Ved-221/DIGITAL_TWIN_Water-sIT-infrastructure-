@@ -74,6 +74,7 @@ class SimulationResult(BaseModel):
     financial_analysis: Optional[str] = None
     risk_analysis: Optional[str] = None
     architect_recommendation: Optional[str] = None
+    recommended_actions: Optional[List[str]] = []
 
 class TwinStats(BaseModel):
     total_components: int
