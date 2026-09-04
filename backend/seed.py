@@ -9,15 +9,15 @@ def seed_data(db: Session):
 
     components_data = [
         # Applications
-        {"id": "app_empower", "name": "Empower (Lab Informatics)", "type": "application", "environment": "on_prem", "location": "US-East", "criticality": "critical", "owner": "Lab Systems", "cost_per_month": 5000.0},
+        {"id": "app_core_api", "name": "Core Microservices API", "type": "application", "environment": "on_prem", "location": "US-East", "criticality": "critical", "owner": "Platform Engineering", "cost_per_month": 5000.0},
         {"id": "app_erp", "name": "ERP System", "type": "application", "environment": "on_prem", "location": "US-East", "criticality": "critical", "owner": "Finance", "cost_per_month": 8000.0},
-        {"id": "app_crm", "name": "CRM", "type": "application", "environment": "cloud", "location": "AWS-us-east-1", "criticality": "high", "owner": "Sales", "cost_per_month": 3000.0},
-        {"id": "app_reporting", "name": "Reporting/Analytics", "type": "application", "environment": "on_prem", "location": "US-East", "criticality": "medium", "owner": "Data Team", "cost_per_month": 1500.0},
-        {"id": "app_lab_portal", "name": "Lab Data Portal", "type": "application", "environment": "hybrid", "location": "Global", "criticality": "high", "owner": "Lab Systems", "cost_per_month": 2500.0},
+        {"id": "app_crm", "name": "CRM Platform", "type": "application", "environment": "cloud", "location": "AWS-us-east-1", "criticality": "high", "owner": "Sales Ops", "cost_per_month": 3000.0},
+        {"id": "app_reporting", "name": "Reporting & Analytics", "type": "application", "environment": "on_prem", "location": "US-East", "criticality": "medium", "owner": "Data Team", "cost_per_month": 1500.0},
+        {"id": "app_portal", "name": "Customer Web Portal", "type": "application", "environment": "hybrid", "location": "Global", "criticality": "high", "owner": "Web Engineering", "cost_per_month": 2500.0},
         
         # Databases
-        {"id": "db_empower", "name": "Empower DB", "type": "database", "environment": "on_prem", "location": "US-East", "criticality": "critical", "owner": "DBA", "cost_per_month": 2000.0},
-        {"id": "db_erp", "name": "ERP DB", "type": "database", "environment": "on_prem", "location": "US-East", "criticality": "critical", "owner": "DBA", "cost_per_month": 4000.0},
+        {"id": "db_core", "name": "Core Transactions DB", "type": "database", "environment": "on_prem", "location": "US-East", "criticality": "critical", "owner": "DBA Team", "cost_per_month": 2000.0},
+        {"id": "db_erp", "name": "ERP Relational DB", "type": "database", "environment": "on_prem", "location": "US-East", "criticality": "critical", "owner": "DBA Team", "cost_per_month": 4000.0},
         {"id": "db_analytics", "name": "Analytics DB", "type": "database", "environment": "cloud", "location": "AWS-us-east-1", "criticality": "high", "owner": "Data Team", "cost_per_month": 3500.0},
         
         # Servers
@@ -33,7 +33,7 @@ def seed_data(db: Session):
         # Cloud/Edge
         {"id": "cloud_compute", "name": "AWS EC2 Cluster", "type": "cloud_resource", "environment": "cloud", "location": "AWS-us-east-1", "criticality": "high", "owner": "Cloud Ops", "cost_per_month": 4500.0},
         {"id": "cloud_s3", "name": "AWS S3 Data Lake", "type": "cloud_resource", "environment": "cloud", "location": "AWS-us-east-1", "criticality": "high", "owner": "Data Team", "cost_per_month": 1200.0},
-        {"id": "edge_gw", "name": "Lab Instrument Gateway", "type": "server", "environment": "on_prem", "location": "Lab-01", "criticality": "high", "owner": "Lab Systems", "cost_per_month": 300.0},
+        {"id": "edge_gw", "name": "Edge Secure VPN Gateway", "type": "server", "environment": "on_prem", "location": "Edge-DC-01", "criticality": "high", "owner": "Network Engineering", "cost_per_month": 300.0},
         
         # Storage
         {"id": "sto_primary", "name": "Primary SAN", "type": "storage", "environment": "on_prem", "location": "US-East", "criticality": "critical", "owner": "Storage Team", "cost_per_month": 6000.0},
@@ -45,13 +45,13 @@ def seed_data(db: Session):
     db.commit()
 
     dependencies_data = [
-        # Empower stack
-        {"source_id": "app_empower", "target_id": "db_empower", "relationship_type": "depends_on", "criticality": "critical"},
-        {"source_id": "app_empower", "target_id": "srv_app_01", "relationship_type": "hosted_on", "criticality": "critical"},
-        {"source_id": "app_empower", "target_id": "sec_auth", "relationship_type": "authenticates_via", "criticality": "critical"},
-        {"source_id": "db_empower", "target_id": "srv_db_01", "relationship_type": "hosted_on", "criticality": "critical"},
-        {"source_id": "db_empower", "target_id": "sto_primary", "relationship_type": "stores_in", "criticality": "critical"},
-        {"source_id": "edge_gw", "target_id": "app_empower", "relationship_type": "connects_to", "criticality": "high"},
+        # Core Microservices stack
+        {"source_id": "app_core_api", "target_id": "db_core", "relationship_type": "depends_on", "criticality": "critical"},
+        {"source_id": "app_core_api", "target_id": "srv_app_01", "relationship_type": "hosted_on", "criticality": "critical"},
+        {"source_id": "app_core_api", "target_id": "sec_auth", "relationship_type": "authenticates_via", "criticality": "critical"},
+        {"source_id": "db_core", "target_id": "srv_db_01", "relationship_type": "hosted_on", "criticality": "critical"},
+        {"source_id": "db_core", "target_id": "sto_primary", "relationship_type": "stores_in", "criticality": "critical"},
+        {"source_id": "edge_gw", "target_id": "app_core_api", "relationship_type": "connects_to", "criticality": "high"},
         
         # ERP stack
         {"source_id": "app_erp", "target_id": "db_erp", "relationship_type": "depends_on", "criticality": "critical"},
@@ -78,13 +78,24 @@ def seed_data(db: Session):
         {"source_id": "app_crm", "target_id": "sec_auth", "relationship_type": "authenticates_via", "criticality": "critical"},
         
         # Portal
-        {"source_id": "app_lab_portal", "target_id": "app_empower", "relationship_type": "connects_to", "criticality": "high"},
-        {"source_id": "app_lab_portal", "target_id": "sec_auth", "relationship_type": "authenticates_via", "criticality": "critical"},
-        {"source_id": "app_lab_portal", "target_id": "cloud_compute", "relationship_type": "hosted_on", "criticality": "high"},
+        {"source_id": "app_portal", "target_id": "app_core_api", "relationship_type": "connects_to", "criticality": "high"},
+        {"source_id": "app_portal", "target_id": "sec_auth", "relationship_type": "authenticates_via", "criticality": "critical"},
+        {"source_id": "app_portal", "target_id": "cloud_compute", "relationship_type": "hosted_on", "criticality": "high"},
     ]
 
     for data in dependencies_data:
-        dep = models.Dependency(**data)
+        dep_dict = {
+            "source_component_id": data["source_id"],
+            "target_component_id": data["target_id"],
+            "source_id": data["source_id"],
+            "target_id": data["target_id"],
+            "relationship_type": data["relationship_type"],
+            "criticality": data["criticality"],
+            "source": "seed",
+            "discovery_source": "seed",
+            "metadata_col": {"origin": "enterprise_baseline"}
+        }
+        dep = models.Dependency(**dep_dict)
         db.add(dep)
     db.commit()
     print("Seed data inserted.")
