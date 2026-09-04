@@ -55,6 +55,14 @@ class Component(Base):
     memory = Column(Float, nullable=True)
     cost_per_month = Column(Float, default=0.0)
     metadata_col = Column(JSON, default={})
+    source_environment = Column(String, default="aws")
+
+class ManualProject(Base):
+    __tablename__ = "manual_projects"
+
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String, index=True)
+    created_at = Column(String, default="2023-01-01T00:00:00Z") # simple string for simplicity or datetime
 
 class Dependency(Base):
     __tablename__ = "dependencies"
@@ -64,3 +72,4 @@ class Dependency(Base):
     target_id = Column(String, ForeignKey("components.id"))
     relationship_type = Column(Enum(DependencyType))
     criticality = Column(Enum(Criticality))
+    source_environment = Column(String, default="aws")

@@ -7,6 +7,7 @@ class DependencyBase(BaseModel):
     target_id: str
     relationship_type: DependencyType
     criticality: Criticality
+    source_environment: str = "aws"
 
 class DependencyCreate(DependencyBase):
     pass
@@ -29,6 +30,7 @@ class ComponentBase(BaseModel):
     memory: Optional[float] = None
     cost_per_month: float = 0.0
     metadata_col: dict = {}
+    source_environment: str = "aws"
 
 class ComponentCreate(ComponentBase):
     pass
@@ -39,10 +41,22 @@ class Component(ComponentBase):
     class Config:
         from_attributes = True
 
+class ManualProjectCreate(BaseModel):
+    name: str
+
+class ManualProject(BaseModel):
+    id: str
+    name: str
+    created_at: str
+
+    class Config:
+        from_attributes = True
+
 class SimulationRequest(BaseModel):
     target_component_id: str
     action: str = "migrate"
     destination_env: Optional[str] = "cloud"
+    use_ai: bool = False
 
 class SimulationResult(BaseModel):
     change_action: str

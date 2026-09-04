@@ -8,3 +8,4 @@ env/
 .DS_Store
 .vscode/
 infratwin.db
+backend/digital_twin.db

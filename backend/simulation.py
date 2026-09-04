@@ -15,6 +15,7 @@ def build_graph(db: Session) -> nx.DiGraph:
             "criticality": c.criticality,
             "cost_per_month": c.cost_per_month,
             "status": c.status,
+            "source_environment": c.source_environment,
         })
         
     dependencies = db.query(models.Dependency).all()
@@ -23,7 +24,7 @@ def build_graph(db: Session) -> nx.DiGraph:
         
     return G
 
-def simulate_change(db: Session, target_component_id: str, change_action: str, destination_env: str = None) -> Dict[str, Any]:
+def simulate_change(db: Session, target_component_id: str, change_action: str, destination_env: str = None, use_ai: bool = False) -> Dict[str, Any]:
     G = build_graph(db)
     
     if target_component_id not in G:
@@ -125,10 +126,19 @@ def simulate_change(db: Session, target_component_id: str, change_action: str, d
         "critical_flags": critical_flags
     }
     
-    import multi_agent_system
-    agent_reports = multi_agent_system.run_multi_agent_analysis(result)
-    result["financial_analysis"] = agent_reports.get("financial", "Financial Analysis unavailable.")
-    result["risk_analysis"] = agent_reports.get("risk", "Risk Analysis unavailable.")
-    result["architect_recommendation"] = agent_reports.get("architect", "Recommendation unavailable.")
+    # By default, use AI only if in AWS env or explicitly requested
+    should_run_ai = use_ai or target_node.get("source_environment", "aws") == "aws"
+    
+    if not should_run_ai:
+        # Bypass AI/ML logic for Manual Environment
+        result["financial_analysis"] = None
+        result["risk_analysis"] = None
+        result["architect_recommendation"] = None
+    else:
+        import multi_agent_system
+        agent_reports = multi_agent_system.run_multi_agent_analysis(result)
+        result["financial_analysis"] = agent_reports.get("financial", "Financial Analysis unavailable.")
+        result["risk_analysis"] = agent_reports.get("risk", "Risk Analysis unavailable.")
+        result["architect_recommendation"] = agent_reports.get("architect", "Recommendation unavailable.")
     
     return result
