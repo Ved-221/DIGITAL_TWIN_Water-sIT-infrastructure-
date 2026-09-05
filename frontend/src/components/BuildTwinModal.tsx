@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   X, Sparkles, FileCode2, ArrowRight, ArrowLeft, CheckCircle2, 
   AlertTriangle, Layers, Server, RefreshCw, Info, Database, 
@@ -14,6 +14,7 @@ import type {
 
 interface BuildTwinModalProps {
   isOpen: boolean;
+  initialTab?: 'describe' | 'structured';
   onClose: () => void;
   onTwinCreated: (result: ApplyParsedTwinResponse) => void;
 }
@@ -67,11 +68,19 @@ const DEFAULT_STRUCTURED_JSON = JSON.stringify(
 
 export const BuildTwinModal: React.FC<BuildTwinModalProps> = ({
   isOpen,
+  initialTab = 'describe',
   onClose,
   onTwinCreated,
 }) => {
-  const [activeTab, setActiveTab] = useState<'describe' | 'structured'>('describe');
+  const [activeTab, setActiveTab] = useState<'describe' | 'structured'>(initialTab);
   const [step, setStep] = useState<'define' | 'review'>('define');
+
+  useEffect(() => {
+    if (isOpen) {
+      setActiveTab(initialTab);
+      setStep('define');
+    }
+  }, [isOpen, initialTab]);
   
   // Define step inputs
   const [domain, setDomain] = useState('general');

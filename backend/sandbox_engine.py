@@ -62,29 +62,64 @@ def initialize_or_get_sandbox(
     ).delete()
     db.flush()
 
+    # Resolve source environment if 'cloud', empty, or ambiguous
+    effective_src_env = source_environment
+    if not effective_src_env or effective_src_env == "cloud":
+        state = db.query(models.TwinState).filter_by(id=1).first()
+        effective_src_env = "aws" if (state and state.mode == "live") else "manual"
+
     # Query source components
-    if source_environment == "manual":
+    if effective_src_env in ["aws", "cloud", "live"]:
+        src_comps = db.query(models.Component).filter(
+            (models.Component.source_environment == "aws") |
+            (models.Component.discovery_source.in_(["aws", "aws_api", "hybrid", "aws_synthetic", "proposed"]))
+        ).all()
+        src_deps = db.query(models.Dependency).filter(
+            (models.Dependency.source_environment == "aws") |
+            (models.Dependency.discovery_source.like("aws%")) |
+            (models.Dependency.source.like("aws%"))
+        ).all()
+    elif effective_src_env == "manual":
         src_comps = db.query(models.Component).filter(
             models.Component.discovery_source.in_(["manual", "user_description"]) |
             (models.Component.source_environment == "manual")
         ).all()
         src_deps = db.query(models.Dependency).filter(
             models.Dependency.source.in_(["manual", "user_description"]) |
+            (models.Dependency.discovery_source.in_(["manual", "user_description"])) |
             (models.Dependency.source_environment == "manual")
         ).all()
     else:
         src_comps = db.query(models.Component).filter(
-            (models.Component.source_environment == source_environment) |
-            (models.Component.discovery_source == source_environment)
+            (models.Component.source_environment == effective_src_env) |
+            (models.Component.discovery_source == effective_src_env)
         ).all()
         src_deps = db.query(models.Dependency).filter(
-            (models.Dependency.source_environment == source_environment) |
-            (models.Dependency.source == source_environment)
+            (models.Dependency.source_environment == effective_src_env) |
+            (models.Dependency.source == effective_src_env)
+        ).all()
+
+    # Fallback to any active non-sandbox components if empty
+    if not src_comps:
+        src_comps = db.query(models.Component).filter(
+            ~models.Component.source_environment.in_([sandbox_env_id, "sandbox", "aws_sim_aws"])
+        ).all()
+        src_deps = db.query(models.Dependency).filter(
+            ~models.Dependency.source_environment.in_([sandbox_env_id, "sandbox", "aws_sim_aws"])
         ).all()
 
     id_map = {}
     for c in src_comps:
-        new_id = c.id if c.id.startswith("sb-") else f"sb-{c.id}"
+        cand_id = c.id if c.id.startswith("sb-") else f"sb-{c.id}"
+        existing_other = db.query(models.Component).filter(
+            models.Component.id == cand_id,
+            models.Component.source_environment != sandbox_env_id
+        ).first()
+        if existing_other:
+            new_id = f"sb-{sandbox_env_id}-{c.id}"
+        else:
+            new_id = cand_id
+
         id_map[c.id] = new_id
         
         cloned_c = models.Component(
@@ -119,7 +154,15 @@ def initialize_or_get_sandbox(
         
         sb_src = id_map.get(src_orig, src_orig)
         sb_tgt = id_map.get(tgt_orig, tgt_orig)
-        new_d_id = d.id if d.id.startswith("sb-") else f"sb-{d.id}"
+        cand_d_id = d.id if d.id.startswith("sb-") else f"sb-{d.id}"
+        existing_dep_other = db.query(models.Dependency).filter(
+            models.Dependency.id == cand_d_id,
+            models.Dependency.source_environment != sandbox_env_id
+        ).first()
+        if existing_dep_other:
+            new_d_id = f"sb-{sandbox_env_id}-{d.id}"
+        else:
+            new_d_id = cand_d_id
         
         cloned_d = models.Dependency(
             id=new_d_id,
@@ -149,11 +192,21 @@ def initialize_or_get_sandbox(
     }
 
 
+def strip_sb_prefix(comp_id: str) -> str:
+    """Safely strips any leading 'sb-' or 'sb-<env>-' prefixes from a component ID."""
+    if not comp_id:
+        return ""
+    clean = str(comp_id)
+    while clean.startswith("sb-"):
+        clean = clean[3:]
+    return clean
+
+
 def apply_candidate_to_sandbox(
     db: Session,
-    source_environment: str,
     target_component_id: str,
     candidate_id: Optional[str] = None,
+    source_environment: str = "manual",
     action: str = "fail",
     candidate_data: Optional[Dict[str, Any]] = None,
     sandbox_env_id: str = "sandbox"
@@ -171,59 +224,101 @@ def apply_candidate_to_sandbox(
     - Returns structured Before vs After comparisons with no fabricated numbers.
     """
     cand = candidate_data or {}
+    clean_target_id = strip_sb_prefix(target_component_id)
+
+    # Resolve target component in database to identify true source environment
+    # Prefer non-sandbox baseline component first
+    src_db_comp = db.query(models.Component).filter(
+        (models.Component.id == clean_target_id) |
+        (models.Component.id == target_component_id),
+        ~models.Component.source_environment.in_(["sandbox", "aws_sim_aws"])
+    ).first()
+
+    if not src_db_comp:
+        src_db_comp = db.query(models.Component).filter(
+            (models.Component.id == target_component_id) |
+            (models.Component.id == clean_target_id) |
+            (models.Component.id == f"sb-{clean_target_id}") |
+            (models.Component.name.ilike(f"%{clean_target_id}%"))
+        ).first()
+
+    resolved_src_env = source_environment
+    if src_db_comp:
+        if src_db_comp.source_environment in ["aws", "manual"]:
+            resolved_src_env = src_db_comp.source_environment
+        elif (src_db_comp.discovery_source or "").startswith("aws") or src_db_comp.arn is not None:
+            resolved_src_env = "aws"
+        elif src_db_comp.discovery_source in ["manual", "user_description"] or (src_db_comp.source or "") in ["manual", "user_description"]:
+            resolved_src_env = "manual"
+        elif src_db_comp.source_environment not in ["sandbox", "aws_sim_aws", "cloud"]:
+            resolved_src_env = src_db_comp.source_environment
+
+    if not resolved_src_env or resolved_src_env in ["cloud", "sandbox", "aws_sim_aws"]:
+        state = db.query(models.TwinState).filter_by(id=1).first()
+        resolved_src_env = "aws" if (state and state.mode == "live") else "manual"
+
+    source_environment = resolved_src_env
+
+    # Extract strategy_type cleanly
     strat_type = (
         cand.get("strategy_type") or 
         cand.get("strategy") or 
         cand.get("action_type") or 
-        (candidate_id.split("-")[0] if candidate_id and "-" in candidate_id else candidate_id) or 
+        cand.get("action") or 
+        action or 
         "multi_az_modernize"
     ).lower()
 
     cand_name = cand.get("name") or cand.get("title") or strat_type.replace("_", " ").title()
-    cand_id = candidate_id or cand.get("id") or f"cand-{uuid.uuid4().hex[:8]}"
+    cand_id = (
+        candidate_id or 
+        cand.get("candidate_id") or 
+        cand.get("id") or 
+        cand.get("solution_id") or 
+        f"cand-{uuid.uuid4().hex[:8]}"
+    )
 
-    # Determine target sandbox environment ID
-    # In legacy AWS simulation, aws clones to 'aws_sim_aws'
-    if source_environment == "aws" and sandbox_env_id == "sandbox":
-        target_env_id = "aws_sim_aws"
-    else:
-        target_env_id = sandbox_env_id
+    # Determine target sandbox environment ID (strictly adhere to requested sandbox_env_id)
+    target_env_id = sandbox_env_id or "sandbox"
 
     # 1. Initialize or get Sandbox
+    # If source_environment is already the sandbox environment, do not wipe/force clone
+    is_already_target = (source_environment == target_env_id)
     init_res = initialize_or_get_sandbox(
         db=db,
         source_environment=source_environment,
         sandbox_env_id=target_env_id,
-        force_clone=False
+        force_clone=not is_already_target
     )
     id_map = init_res.get("id_map", {})
 
     # 2. Resolve target component in sandbox
-    target_sb_id = id_map.get(target_component_id)
+    target_sb_id = id_map.get(target_component_id) or id_map.get(clean_target_id)
     if not target_sb_id:
-        # Try direct match, sb- prefix, or name match in sandbox
+        # Try direct match in sandbox
         cand_comp = db.query(models.Component).filter(
             models.Component.source_environment == target_env_id,
             (models.Component.id == target_component_id) |
-            (models.Component.id == f"sb-{target_component_id}") |
-            (models.Component.name.ilike(f"%{target_component_id}%"))
+            (models.Component.id == clean_target_id) |
+            (models.Component.id == f"sb-{clean_target_id}") |
+            (models.Component.id == f"sb-{target_env_id}-{clean_target_id}") |
+            (models.Component.name.ilike(f"%{clean_target_id}%"))
         ).first()
         if cand_comp:
             target_sb_id = cand_comp.id
         else:
             # Check if target exists in source environment (by id or name)
-            src_comp = db.query(models.Component).filter(
-                (models.Component.id == target_component_id) |
-                (models.Component.name.ilike(f"%{target_component_id}%"))
-            ).first()
-            if src_comp:
-                target_sb_id = id_map.get(src_comp.id)
+            if src_db_comp:
+                clean_src_id = strip_sb_prefix(src_db_comp.id)
+                target_sb_id = id_map.get(src_db_comp.id) or id_map.get(clean_src_id)
                 if not target_sb_id:
                     # Look in sandbox by source component's cloned ID or name
                     sb_match = db.query(models.Component).filter(
                         models.Component.source_environment == target_env_id,
-                        (models.Component.id == f"sb-{src_comp.id}") |
-                        (models.Component.name == src_comp.name)
+                        (models.Component.id == f"sb-{clean_src_id}") |
+                        (models.Component.id == f"sb-{target_env_id}-{clean_src_id}") |
+                        (models.Component.id == clean_src_id) |
+                        (models.Component.name == src_db_comp.name)
                     ).first()
                     if sb_match:
                         target_sb_id = sb_match.id
@@ -235,7 +330,7 @@ def apply_candidate_to_sandbox(
                             force_clone=True
                         )
                         id_map = init_res.get("id_map", {})
-                        target_sb_id = id_map.get(src_comp.id, f"sb-{src_comp.id}")
+                        target_sb_id = id_map.get(src_db_comp.id) or id_map.get(clean_src_id, f"sb-{clean_src_id}")
             else:
                 raise ValueError(f"Component '{target_component_id}' not found in database.")
 
@@ -283,7 +378,8 @@ def apply_candidate_to_sandbox(
             "id": cand_id,
             "solution_id": cand_id,
             "name": cand_name,
-            "strategy_type": strat_type
+            "strategy_type": strat_type,
+            "source_environment": source_environment
         }
     )
 
@@ -296,7 +392,160 @@ def apply_candidate_to_sandbox(
     edges_removed: List[Dict[str, Any]] = []
 
     try:
-        if strat_type in ["multi_az_modernize", "multi_az_standby", "redundancy", "load_balancer"]:
+        # Check if structured transformation diffs are provided in candidate_data (Part J)
+        comps_to_add = cand.get("components_to_add") or []
+        comps_to_mod = cand.get("components_to_modify") or []
+        comps_to_rem = cand.get("components_to_remove") or []
+        deps_to_add = cand.get("dependencies_to_add") or []
+        deps_to_rem = cand.get("dependencies_to_remove") or []
+        has_structured_diff = bool(comps_to_add or comps_to_rem or deps_to_add or deps_to_rem)
+
+        if has_structured_diff:
+            # 1. Add Components
+            for c_spec in comps_to_add:
+                c_raw_id = c_spec.get("id") or f"comp-{uuid.uuid4().hex[:6]}"
+                cand_add_id = c_raw_id if c_raw_id.startswith("sb-") else f"sb-{c_raw_id}"
+                existing_add_other = db.query(models.Component).filter(
+                    models.Component.id == cand_add_id,
+                    models.Component.source_environment != target_env_id
+                ).first()
+                if existing_add_other:
+                    new_id = f"sb-{target_env_id}-{c_raw_id}"
+                else:
+                    new_id = cand_add_id
+                id_map[c_raw_id] = new_id
+
+                raw_type = str(c_spec.get("type", target_comp.type)).replace("ComponentType.", "")
+                try:
+                    c_type = models.ComponentType(raw_type) if isinstance(raw_type, str) else raw_type
+                except Exception:
+                    c_type = target_comp.type
+
+                new_c = models.Component(
+                    id=new_id,
+                    name=c_spec.get("name", f"Added {c_raw_id}"),
+                    type=c_type,
+                    environment=target_comp.environment,
+                    location=target_comp.location,
+                    criticality=c_spec.get("criticality", target_comp.criticality),
+                    owner=target_comp.owner or "Sandbox User",
+                    status="active",
+                    cost_per_month=float(c_spec.get("cost_per_month", 25.0)),
+                    discovery_source="sandbox",
+                    source_environment=target_env_id,
+                    metadata_col=dict(c_spec.get("metadata_col") or {})
+                )
+                db.add(new_c)
+                nodes_added.append({"id": new_id, "name": new_c.name, "type": str(new_c.type)})
+                mutations_applied.append(f"Added sandbox component: {new_c.name}")
+            db.flush()
+
+            # 2. Modify Components
+            for m_spec in comps_to_mod:
+                m_orig_id = m_spec.get("id")
+                m_target_id = id_map.get(m_orig_id, f"sb-{m_orig_id}") if m_orig_id else target_comp.id
+                m_comp = db.query(models.Component).filter(
+                    models.Component.source_environment == target_env_id,
+                    (models.Component.id == m_target_id) | (models.Component.id == m_orig_id)
+                ).first()
+                if m_comp:
+                    ch = m_spec.get("changes", {})
+                    if "cpu" in ch:
+                        try:
+                            m_comp.cpu = float(str(ch["cpu"]).split("->")[-1].strip())
+                        except Exception:
+                            pass
+                    if "memory" in ch:
+                        try:
+                            m_comp.memory = float(str(ch["memory"]).split("->")[-1].strip())
+                        except Exception:
+                            pass
+                    if "cost_per_month" in ch:
+                        try:
+                            m_comp.cost_per_month = float(ch["cost_per_month"])
+                        except Exception:
+                            pass
+                    if "status" in ch:
+                        m_comp.status = str(ch["status"])
+                    if "criticality" in ch:
+                        m_comp.criticality = str(ch["criticality"])
+
+                    meta = dict(m_comp.metadata_col or {})
+                    meta.update(ch)
+                    m_comp.metadata_col = meta
+                    nodes_modified.append({"id": m_comp.id, "name": m_comp.name, "changes": ch})
+                    mutations_applied.append(f"Modified sandbox component: {m_comp.name}")
+            db.flush()
+
+            # 3. Remove Dependencies
+            for d_rem in deps_to_rem:
+                s_orig = d_rem.get("source") or d_rem.get("source_id")
+                t_orig = d_rem.get("target") or d_rem.get("target_id")
+                s_sb = id_map.get(s_orig, f"sb-{s_orig}")
+                t_sb = id_map.get(t_orig, f"sb-{t_orig}")
+
+                matched_deps = db.query(models.Dependency).filter(
+                    models.Dependency.source_environment == target_env_id,
+                    ((models.Dependency.source_id == s_sb) & (models.Dependency.target_id == t_sb)) |
+                    ((models.Dependency.source_id == s_orig) & (models.Dependency.target_id == t_orig))
+                ).all()
+                for md in matched_deps:
+                    edges_removed.append({"source": md.source_id, "target": md.target_id, "type": md.relationship_type})
+                    db.delete(md)
+            db.flush()
+
+            # 4. Add Dependencies
+            for d_add in deps_to_add:
+                s_orig = d_add.get("source") or d_add.get("source_id") or d_add.get("source_component_id")
+                t_orig = d_add.get("target") or d_add.get("target_id") or d_add.get("target_component_id")
+                s_sb = id_map.get(s_orig, f"sb-{s_orig}" if not s_orig.startswith("sb-") else s_orig)
+                t_sb = id_map.get(t_orig, f"sb-{t_orig}" if not t_orig.startswith("sb-") else t_orig)
+                rel_type = d_add.get("relationship_type", "connects_to")
+
+                existing_dep = db.query(models.Dependency).filter(
+                    models.Dependency.source_environment == target_env_id,
+                    models.Dependency.source_id == s_sb,
+                    models.Dependency.target_id == t_sb
+                ).first()
+                if not existing_dep:
+                    cloned_dep = models.Dependency(
+                        id=f"dep-{uuid.uuid4().hex[:8]}",
+                        source_id=s_sb,
+                        target_id=t_sb,
+                        source_component_id=s_sb,
+                        target_component_id=t_sb,
+                        relationship_type=rel_type,
+                        criticality=d_add.get("criticality", "medium"),
+                        source=target_env_id,
+                        source_environment=target_env_id,
+                        discovery_source="sandbox"
+                    )
+                    db.add(cloned_dep)
+                    edges_added.append({"source": s_sb, "target": t_sb, "type": rel_type})
+                    mutations_applied.append(f"Added sandbox link: {s_sb} -> {t_sb} ({rel_type})")
+            db.flush()
+
+            # 5. Remove Components
+            for r_spec in comps_to_rem:
+                r_orig_id = r_spec.get("id")
+                r_target_id = id_map.get(r_orig_id, f"sb-{r_orig_id}") if r_orig_id else target_comp.id
+                r_comp = db.query(models.Component).filter(
+                    models.Component.source_environment == target_env_id,
+                    (models.Component.id == r_target_id) | (models.Component.id == r_orig_id)
+                ).first()
+                if r_comp:
+                    inc_deps = db.query(models.Dependency).filter(
+                        models.Dependency.source_environment == target_env_id,
+                        (models.Dependency.source_id == r_comp.id) | (models.Dependency.target_id == r_comp.id)
+                    ).all()
+                    for idp in inc_deps:
+                        edges_removed.append({"source": idp.source_id, "target": idp.target_id, "type": idp.relationship_type})
+                        db.delete(idp)
+                    nodes_removed.append({"id": r_comp.id, "name": r_comp.name, "type": str(r_comp.type)})
+                    mutations_applied.append(f"Removed sandbox component: {r_comp.name}")
+                    db.delete(r_comp)
+
+        elif strat_type in ["multi_az_modernize", "multi_az_standby", "redundancy", "load_balancer"]:
             alb_id = f"alb-{uuid.uuid4().hex[:6]}"
             standby_id = f"standby-{uuid.uuid4().hex[:6]}"
             
@@ -764,12 +1013,15 @@ def rollback_sandbox(
 def accept_sandbox(
     db: Session,
     snapshot_id: str,
-    sandbox_env_id: str = "sandbox"
+    sandbox_env_id: str = "sandbox",
+    promote_to_baseline: bool = False
 ) -> Dict[str, Any]:
     """
     Approves the mutated sandbox state and marks the snapshot as accepted.
-    Preserves the mutated topology as the new sandbox baseline.
-    Original Twin and live AWS infrastructure remain completely unchanged.
+    Preserves the mutated topology as the approved sandbox baseline.
+    Original Twin and live AWS infrastructure remain completely unchanged and read-only.
+    If promote_to_baseline is explicitly requested for a manual twin, synchronizes
+    the approved topology back into the manual baseline.
     """
     snapshot = db.query(models.SandboxSnapshot).filter(
         models.SandboxSnapshot.id == snapshot_id
@@ -778,14 +1030,91 @@ def accept_sandbox(
         raise ValueError(f"Snapshot '{snapshot_id}' not found.")
 
     env_id = snapshot.environment_id or sandbox_env_id
+    state_json = snapshot.state_json or {}
+    source_env = state_json.get("source_environment")
+
     accept_res = snapshot_manager.accept_snapshot(db, snapshot_id)
+
+    promoted_to_manual = False
+    if source_env == "manual" and promote_to_baseline:
+        try:
+            sandbox_comps = db.query(models.Component).filter(
+                models.Component.source_environment == env_id
+            ).all()
+            sandbox_deps = db.query(models.Dependency).filter(
+                models.Dependency.source_environment == env_id
+            ).all()
+
+            if sandbox_comps:
+                # Remove manual baseline objects via session delete to keep identity map clean
+                manual_deps = db.query(models.Dependency).filter(models.Dependency.source_environment == "manual").all()
+                for md in manual_deps:
+                    db.delete(md)
+                manual_comps = db.query(models.Component).filter(models.Component.source_environment == "manual").all()
+                for mc in manual_comps:
+                    db.delete(mc)
+                db.flush()
+
+                id_map = {}
+                for sc in sandbox_comps:
+                    clean_id = sc.id[3:] if sc.id.startswith("sb-") else sc.id
+                    id_map[sc.id] = clean_id
+
+                    new_manual_comp = models.Component(
+                        id=clean_id,
+                        name=sc.name,
+                        type=sc.type,
+                        environment=sc.environment,
+                        location=sc.location,
+                        criticality=sc.criticality,
+                        owner=sc.owner,
+                        status=sc.status,
+                        cpu=sc.cpu,
+                        memory=sc.memory,
+                        cost_per_month=sc.cost_per_month,
+                        discovery_source="manual",
+                        source_environment="manual",
+                        metadata_col=dict(sc.metadata_col or {})
+                    )
+                    db.add(new_manual_comp)
+                db.flush()
+
+                for sd in sandbox_deps:
+                    m_src = id_map.get(sd.source_id, sd.source_id)
+                    m_tgt = id_map.get(sd.target_id, sd.target_id)
+                    clean_dep_id = f"dep-{uuid.uuid4().hex[:8]}"
+
+                    new_manual_dep = models.Dependency(
+                        id=clean_dep_id,
+                        source_id=m_src,
+                        target_id=m_tgt,
+                        source_component_id=m_src,
+                        target_component_id=m_tgt,
+                        relationship_type=sd.relationship_type,
+                        criticality=sd.criticality,
+                        source="manual",
+                        source_environment="manual",
+                        discovery_source="manual",
+                        metadata_col=dict(sd.metadata_col or {})
+                    )
+                    db.add(new_manual_dep)
+                db.commit()
+
+                # Rebuild graph for manual
+                build_graph(db, "manual")
+                promoted_to_manual = True
+        except Exception as ex:
+            db.rollback()
+            logger.warning(f"Failed to promote sandbox to manual baseline: {ex}")
 
     return {
         "accepted": True,
         "snapshot_id": snapshot_id,
         "environment_id": env_id,
         "sandbox_id": env_id,
-        "status": "accepted"
+        "status": "accepted",
+        "source_environment": source_env,
+        "promoted_to_manual": promoted_to_manual
     }
 
 

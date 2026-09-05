@@ -409,6 +409,17 @@ def rank_candidates(
             raw_score = float(rf_reg.predict(vec)[0])
             suitability = round(float(np.clip(raw_score, 0.0, 1.0)), 4)
 
+            # Predict genuine classification confidence from RandomForestClassifier if present
+            confidence = None
+            rf_clf = model_obj.get("classifier")
+            if rf_clf is not None and hasattr(rf_clf, "predict_proba"):
+                try:
+                    probs = rf_clf.predict_proba(vec)[0]
+                    if len(probs) >= 2:
+                        confidence = round(float(probs[1]), 4)
+                except Exception:
+                    confidence = None
+
             # Determine key driving features actually used
             features_used = []
             explanation_points = []
@@ -448,6 +459,7 @@ def rank_candidates(
                 "candidate_id": cid,
                 "strategy_type": feat.get("strategy_type"),
                 "suitability_score": suitability,
+                "confidence": confidence,
                 "features_used": features_used,
                 "explanation": explanation,
                 "feasibility": feasibility,
@@ -472,6 +484,8 @@ def rank_candidates(
             ranked_items.append({
                 "candidate_id": item["candidate_id"],
                 "rank": idx + 1,
+                "score": item["suitability_score"],
+                "confidence": item["confidence"],
                 "recommendation": is_recommended,
                 "ranking_method": RANKING_METHOD_PROTOTYPE,
                 "features_used": item["features_used"],

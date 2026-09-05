@@ -11,3 +11,4 @@ infratwin.db
 backend/digital_twin.db
 pytest_full.txt
 *.log
+*.db

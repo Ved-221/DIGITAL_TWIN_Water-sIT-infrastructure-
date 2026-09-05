@@ -201,6 +201,8 @@ class ConstraintsEvaluation(BaseModel):
 class FeasibleSolution(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="ignore")
     id: str
+    candidate_id: Optional[str] = None
+    solution_id: Optional[str] = None
     name: Optional[str] = None
     description: str
     risk_level: Optional[str] = "LOW"
@@ -212,6 +214,10 @@ class FeasibleSolution(BaseModel):
     @classmethod
     def populate_name_and_title(cls, data):
         if isinstance(data, dict):
+            raw_id = data.get("id") or data.get("candidate_id") or data.get("solution_id") or "Solution"
+            data["id"] = raw_id
+            data["candidate_id"] = raw_id
+            data["solution_id"] = raw_id
             t = data.get("title")
             n = data.get("name")
             if not n and t:
@@ -219,9 +225,13 @@ class FeasibleSolution(BaseModel):
             elif not t and n:
                 data["title"] = n
             elif not n and not t:
-                data["name"] = data.get("id", "Solution")
-                data["title"] = data.get("id", "Solution")
+                data["name"] = raw_id
+                data["title"] = raw_id
         elif hasattr(data, "__dict__"):
+            raw_id = getattr(data, "id", None) or getattr(data, "candidate_id", None) or getattr(data, "solution_id", None) or "Solution"
+            setattr(data, "id", raw_id)
+            setattr(data, "candidate_id", raw_id)
+            setattr(data, "solution_id", raw_id)
             t = getattr(data, "title", None)
             n = getattr(data, "name", None)
             if not n and t:
@@ -703,12 +713,38 @@ class CandidateSimulationResult(BaseModel):
 class WhatIfCandidate(BaseModel):
     model_config = ConfigDict(extra="ignore")
     candidate_id: str
+    id: Optional[str] = None
+    solution_id: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_candidate_ids(cls, data):
+        if isinstance(data, dict):
+            raw_id = data.get("candidate_id") or data.get("id") or data.get("solution_id")
+            if raw_id:
+                data["candidate_id"] = raw_id
+                data["id"] = raw_id
+                data["solution_id"] = raw_id
+        elif hasattr(data, "__dict__"):
+            raw_id = getattr(data, "candidate_id", None) or getattr(data, "id", None) or getattr(data, "solution_id", None)
+            if raw_id:
+                setattr(data, "candidate_id", raw_id)
+                setattr(data, "id", raw_id)
+                setattr(data, "solution_id", raw_id)
+        return data
+
     name: str
     description: str = ""
     strategy_type: str = "direct_lift_shift"
     proposed_changes: List[str] = []
     resulting_topology: Optional[Dict[str, Any]] = None
     affected_components: List[Dict[str, Any]] = []
+    components_to_add: List[Dict[str, Any]] = []
+    components_to_modify: List[Dict[str, Any]] = []
+    components_to_remove: List[Dict[str, Any]] = []
+    dependencies_to_add: List[Dict[str, Any]] = []
+    dependencies_to_modify: List[Dict[str, Any]] = []
+    dependencies_to_remove: List[Dict[str, Any]] = []
     simulation_result: CandidateSimulationResult
     available_metrics: List[str] = []
     missing_data: List[str] = []
@@ -775,6 +811,8 @@ class MLRankingItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
     candidate_id: str
     rank: int
+    score: Optional[float] = None
+    confidence: Optional[float] = None
     recommendation: bool = False
     ranking_method: str = "Simulation-Trained ML Prototype"
     features_used: List[str] = []
@@ -855,12 +893,25 @@ class WhatIfCandidateResponse(BaseModel):
 
 class SandboxApplyRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    source_environment: str = "manual"
+    source_environment: Optional[str] = None
     target_component_id: str
     candidate_id: Optional[str] = None
+    id: Optional[str] = None
+    solution_id: Optional[str] = None
     action: str = "fail"
     candidate_data: Optional[Dict[str, Any]] = None
     sandbox_env_id: str = "sandbox"
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_apply_ids(cls, data):
+        if isinstance(data, dict):
+            raw_id = data.get("candidate_id") or data.get("id") or data.get("solution_id")
+            if raw_id:
+                data["candidate_id"] = raw_id
+                data["id"] = raw_id
+                data["solution_id"] = raw_id
+        return data
 
 
 class SandboxApplyResponse(BaseModel):
@@ -917,6 +968,8 @@ class SandboxAcceptResponse(BaseModel):
     environment_id: str
     sandbox_id: str
     status: str = "accepted"
+    source_environment: Optional[str] = None
+    promoted_to_manual: Optional[bool] = None
 
 
 class SandboxBeforeAfterResponse(BaseModel):

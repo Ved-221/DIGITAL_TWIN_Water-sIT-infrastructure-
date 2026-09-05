@@ -6,6 +6,7 @@ import { apiClient } from './client';
 import type {
   WhatIfRequest,
   WhatIfCandidateResponse,
+  MultiAgentDecision,
   SimulationRequest,
   SimulationResult,
   FeasibleSolutionsGenerateRequest,
@@ -21,6 +22,13 @@ export const whatIfApi = {
    */
   async getCandidates(request: WhatIfRequest): Promise<WhatIfCandidateResponse> {
     return apiClient.post<WhatIfCandidateResponse>('/twin/what-if/candidates', request);
+  },
+
+  /**
+   * Triggers Three-Agent (Financial, Risk, System Architect) expert consensus analysis.
+   */
+  async evaluateAgents(request: WhatIfRequest): Promise<MultiAgentDecision> {
+    return apiClient.post<MultiAgentDecision>('/twin/what-if/agents/evaluate', request);
   },
 
   /**

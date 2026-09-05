@@ -22,6 +22,26 @@ export const AWSConnectModal: React.FC<AWSConnectModalProps> = ({
   
   const [connecting, setConnecting] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [projectCreds, setProjectCreds] = useState<{
+    authenticated: boolean;
+    account_id?: string | null;
+    arn?: string | null;
+    region?: string | null;
+  } | null>(null);
+
+  React.useEffect(() => {
+    if (!isOpen) return;
+    let isMounted = true;
+    fetch(`${apiBase}/aws/status`)
+      .then(res => res.json())
+      .then(data => {
+        if (isMounted && data?.authenticated) {
+          setProjectCreds(data);
+        }
+      })
+      .catch(() => {});
+    return () => { isMounted = false; };
+  }, [isOpen, apiBase]);
 
   if (!isOpen) return null;
 
@@ -48,12 +68,21 @@ export const AWSConnectModal: React.FC<AWSConnectModalProps> = ({
         })
       });
 
-      const data = await res.json();
+      let data: any;
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        setStatusMessage({
+          type: 'error',
+          text: `Digital Twin server returned status ${res.status} (${res.statusText}). Check backend logs.`
+        });
+        return;
+      }
 
       if (data.authenticated) {
         setStatusMessage({
           type: 'success',
-          text: `Authenticated! Account: ${data.account_id} (${data.arn})`
+          text: `Authenticated! Account: ${data.account_id} (${data.arn}). Saved to project .env.`
         });
 
         setTimeout(() => {
@@ -69,7 +98,7 @@ export const AWSConnectModal: React.FC<AWSConnectModalProps> = ({
     } catch (err: any) {
       setStatusMessage({
         type: 'error',
-        text: `Network error connecting to Digital Twin backend: ${err.message}`
+        text: `Cannot connect to Digital Twin backend at ${apiBase}. Verify the server is running on port 8000: ${err.message}`
       });
     } finally {
       setConnecting(false);
@@ -98,6 +127,30 @@ export const AWSConnectModal: React.FC<AWSConnectModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          {projectCreds?.authenticated && (
+            <div className="bg-emerald-950/70 border border-emerald-700/80 rounded-xl p-3.5 flex items-center justify-between gap-3 shadow-md">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <CheckCircle2 size={18} className="text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-emerald-200">Project Credentials Configured (.env)</p>
+                  <p className="text-[11px] text-emerald-400 font-mono truncate">
+                    Account: {projectCreds.account_id || 'Active'} • Region: {projectCreds.region || region}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  onConnected(projectCreds);
+                  onClose();
+                }}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition shrink-0 shadow-sm"
+              >
+                Use Configured AWS
+              </button>
+            </div>
+          )}
+
           <div>
             <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
               AWS Access Key ID *
@@ -177,7 +230,7 @@ export const AWSConnectModal: React.FC<AWSConnectModalProps> = ({
 
           <div className="bg-slate-900/60 p-3 rounded-lg border border-slate-700/60 text-[11px] text-slate-400 flex items-start gap-2">
             <Shield size={14} className="text-blue-400 shrink-0 mt-0.5" />
-            <span>Credentials are held in memory for the active backend session and used solely to query read-only AWS APIs (EC2, RDS, VPC, CloudWatch). Credentials are never stored on disk or committed to source control.</span>
+            <span>Credentials can be entered here or configured directly in <code className="text-cyan-300 font-mono">backend/.env</code> (<code className="text-cyan-300 font-mono">AWS_ACCESS_KEY_ID</code> and <code className="text-cyan-300 font-mono">AWS_SECRET_ACCESS_KEY</code>). Submitted credentials are saved securely in your project configuration.</span>
           </div>
 
           <div className="flex items-center justify-end gap-3 pt-2">

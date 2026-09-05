@@ -11,6 +11,8 @@ import risk_engine
 import cost_engine
 import downtime_engine
 import ai_engine
+import solution_generator
+import what_if_engine
 
 logger = logging.getLogger("infratwin.feasibility_engine")
 
@@ -377,6 +379,181 @@ def generate_feasible_solutions(
             }
         ))
 
+    # -------------------------------------------------------------------------
+    # Candidate 5+: Dynamic Architectural Candidates (VPC, Subnet, Network, Queues, etc.)
+    # -------------------------------------------------------------------------
+    # If candidate_solutions is empty or simulation_result has candidate solutions,
+    # evaluate dynamic candidates so that no component type is left without solutions.
+    existing_sim_sols = simulation_result.get("feasible_solutions") or []
+    if len(candidate_solutions) == 0 or existing_sim_sols:
+        # Build simulation context for solution_generator
+        sim_context = {
+            "action": base_action,
+            "affected_count": base_blast_radius,
+            "upstream_impact_count": len(inbound_nodes),
+            "risk_score": float(base_risk_score),
+            "cost_delta_monthly": simulation_result.get("cost_delta_monthly", 0.0),
+            "estimated_downtime_minutes": simulation_result.get("estimated_downtime_minutes", 0),
+            "risk_factors": {
+                "target_criticality": target_crit,
+                "component_status": target_node.get("status", "active"),
+                "cpu_utilization_percent": cpu_val,
+                "is_single_point_of_failure": has_spof or (len(dependents) >= 1) or (base_blast_radius >= 1)
+            }
+        }
+
+        # Source candidate pool: from existing simulation or generated dynamically
+        cand_pool = []
+        if existing_sim_sols:
+            for es in existing_sim_sols:
+                es_dict = es.model_dump() if hasattr(es, "model_dump") else (es if isinstance(es, dict) else dict(es))
+                cand_pool.append(es_dict)
+
+        if not cand_pool:
+            cand_pool = solution_generator.generate_applicable_candidates(
+                component=target_comp,
+                simulation_result=sim_context,
+                currency="USD"
+            )
+
+        existing_strategy_types = {s.strategy_type for s in candidate_solutions if s.strategy_type}
+        existing_ids = {s.id for s in candidate_solutions}
+
+        for idx, cand in enumerate(cand_pool):
+            strat_type = cand.get("strategy_type") or cand.get("action_type") or "direct_lift_shift"
+            if strat_type in existing_strategy_types:
+                continue
+
+            c_id = cand.get("id") or cand.get("candidate_id") or f"sol-{strat_type[:8]}-{target_component_id[:8]}"
+            if c_id in existing_ids:
+                continue
+
+            # In-memory sandbox mutation simulation
+            G_temp = G.copy()
+            try:
+                G_mut, mutations, extra_cost, diff_dict = what_if_engine._apply_candidate_mutation(
+                    G_temp, target_component_id, strat_type, target_comp
+                )
+            except Exception as e:
+                logger.warning("Failed in-memory mutation simulation for %s: %s", strat_type, str(e))
+                continue
+
+            temp_affected = list(set(nx.descendants(G_mut, target_component_id))) if target_component_id in G_mut else []
+            temp_blast_radius = len(temp_affected)
+
+            # Calculate safe risk reduction
+            if strat_type in ["multi_az_modernize", "multi_az_standby", "redundancy"]:
+                score_drop = max(15.0, min(35.0, base_risk_score * 0.45))
+                sol_spof_eliminated = True
+                act_type = "ADD_HA_STANDBY"
+            elif strat_type in ["read_replica_offload", "replication"]:
+                score_drop = max(10.0, min(25.0, base_risk_score * 0.35))
+                sol_spof_eliminated = True
+                act_type = "ADD_READ_REPLICA"
+            elif strat_type in ["dependency_circuit_breaker", "dependency_decoupling"]:
+                score_drop = max(10.0, min(25.0, base_risk_score * 0.30))
+                sol_spof_eliminated = True
+                act_type = "ADD_REDUNDANCY"
+            elif strat_type in ["scale_up", "scale_out", "scale"]:
+                score_drop = max(10.0, min(20.0, base_risk_score * 0.25))
+                sol_spof_eliminated = False
+                act_type = "SCALE_COMPUTE"
+            elif strat_type in ["expand_storage"]:
+                score_drop = max(5.0, min(15.0, base_risk_score * 0.20))
+                sol_spof_eliminated = False
+                act_type = "EXPAND_STORAGE"
+            elif strat_type in ["phased_blue_green", "staged_migration"]:
+                score_drop = max(10.0, min(25.0, base_risk_score * 0.30))
+                sol_spof_eliminated = True
+                act_type = "ADD_HA_STANDBY"
+            else:
+                score_drop = max(5.0, min(15.0, base_risk_score * 0.20))
+                sol_spof_eliminated = False
+                act_type = "SCALE_COMPUTE"
+
+            new_risk_score = max(5, int(round(base_risk_score - score_drop)))
+            if new_risk_score >= base_risk_score:
+                new_risk_score = max(5, int(base_risk_score) - 10)
+            new_risk_level = "LOW" if new_risk_score <= 35 else "MEDIUM" if new_risk_score <= 65 else "HIGH"
+
+            cost_delta = float(cand.get("cost_delta_monthly") if cand.get("cost_delta_monthly") is not None else extra_cost)
+            cost_display = f"+${cost_delta:,.2f}/mo" if cost_delta > 0 else ("-$" + f"{abs(cost_delta):,.2f}/mo" if cost_delta < 0 else "No additional cost")
+            est_dt = int(cand.get("estimated_downtime_minutes") or 0)
+            dt_display = f"{est_dt} min (Zero-downtime rolling provision)" if est_dt == 0 else f"{est_dt} min (Scheduled maintenance window)"
+            perf_display = f"Resource capacity optimized" if cpu_val is not None else "Headroom optimized with zero-downtime protection"
+
+            # Check if candidate already has a valid ConstraintsEvaluation
+            eval_data = None
+            if cand.get("constraints_evaluation"):
+                raw_ce = cand["constraints_evaluation"]
+                if hasattr(raw_ce, "model_dump"):
+                    eval_data = raw_ce
+                elif isinstance(raw_ce, dict):
+                    try:
+                        eval_data = schemas.ConstraintsEvaluation(**raw_ce)
+                    except Exception:
+                        eval_data = None
+
+            if not eval_data:
+                eval_data = schemas.ConstraintsEvaluation(
+                    cost_impact=cost_delta,
+                    cost_impact_display=cost_display,
+                    resilience="Improved — High Availability standby eliminates Single Point of Failure (SPOF)" if sol_spof_eliminated else "Maintained baseline resilience",
+                    risk_reduction=f"Risk reduced from {base_risk_level} ({int(base_risk_score)}/100) to {new_risk_level} ({int(new_risk_score)}/100)",
+                    risk_score_before=int(base_risk_score),
+                    risk_score_after=int(new_risk_score),
+                    downtime_minutes=est_dt,
+                    downtime_display=dt_display,
+                    blast_radius_before=int(base_blast_radius),
+                    blast_radius_after=int(temp_blast_radius),
+                    performance=perf_display
+                )
+
+            # Build structured changes object
+            changes_obj = dict(diff_dict)
+            if diff_dict.get("components_to_add"):
+                changes_obj["type"] = "add_component_and_dependencies"
+                changes_obj["component"] = diff_dict["components_to_add"][0]
+                changes_obj["dependencies"] = diff_dict.get("dependencies_to_add", [])
+            elif diff_dict.get("components_to_modify"):
+                changes_obj["type"] = "update_component"
+                changes_obj["component_id"] = target_component_id
+                changes_obj["updates"] = diff_dict["components_to_modify"][0].get("changes", {})
+
+            cand_name = cand.get("name") or cand.get("title") or strat_type.replace("_", " ").title()
+            feas_reason = (
+                f"Eliminates single-point-of-failure exposure, lowering risk score from {int(base_risk_score)} to {int(new_risk_score)} "
+                f"and containing blast radius to {temp_blast_radius} nodes."
+                if sol_spof_eliminated else
+                f"Optimizes operational headroom and lowers risk score from {int(base_risk_score)} to {int(new_risk_score)}."
+            )
+
+            candidate_solutions.append(schemas.FeasibleSolution(
+                id=c_id,
+                candidate_id=c_id,
+                solution_id=c_id,
+                name=cand_name,
+                title=cand_name,
+                action_type=act_type,
+                strategy_type=strat_type,
+                description=cand.get("description") or f"Implement {strat_type.replace('_', ' ')} for {target_name}.",
+                expected_impact=cand.get("expected_impact") or f"Reduces risk score by {int(base_risk_score - new_risk_score)} points and safeguards dependent workloads.",
+                is_feasible=True,
+                feasibility_reason=feas_reason,
+                constraints_evaluation=eval_data,
+                changes=changes_obj,
+                estimated_downtime_minutes=est_dt,
+                cost_delta_monthly=cost_delta,
+                feasibility_score=cand.get("feasibility_score", 0.85),
+                rank=cand.get("rank", len(candidate_solutions) + 1),
+                pros=cand.get("pros", []),
+                cons=cand.get("cons", []),
+                prerequisites=cand.get("prerequisites", []),
+                implementation_steps=cand.get("implementation_steps", [])
+            ))
+            existing_strategy_types.add(strat_type)
+            existing_ids.add(c_id)
+
     # Remove any solutions that do not meet feasibility constraints
     feasible_solutions = [s for s in candidate_solutions if s.is_feasible]
 
@@ -451,56 +628,57 @@ def apply_feasible_solution(
     applied_source = "proposed" if is_live else "manual"
     applied_comp_ids = []
 
-    if change_type == "add_component_and_dependencies":
-        comp_data = changes.get("component", {})
-        new_comp_id = comp_data.get("id") or f"{target_component_id}-sol-{uuid.uuid4().hex[:4]}"
-        
-        # Check if component already exists
-        existing_c = db.query(models.Component).filter_by(id=new_comp_id).first()
-        if not existing_c:
-            raw_type = comp_data.get("type", target_comp.type)
-            try:
-                comp_type = models.ComponentType(raw_type) if isinstance(raw_type, str) else raw_type
-            except Exception:
-                comp_type = target_comp.type
+    if change_type == "add_component_and_dependencies" or "components_to_add" in changes:
+        comp_items = changes.get("components_to_add") or ([changes.get("component")] if changes.get("component") else [])
+        for comp_data in comp_items:
+            if not comp_data:
+                continue
+            new_comp_id = comp_data.get("id") or f"{target_component_id}-sol-{uuid.uuid4().hex[:4]}"
+            existing_c = db.query(models.Component).filter_by(id=new_comp_id).first()
+            if not existing_c:
+                raw_type = comp_data.get("type", target_comp.type)
+                try:
+                    comp_type = models.ComponentType(raw_type) if isinstance(raw_type, str) else raw_type
+                except Exception:
+                    comp_type = target_comp.type
 
-            raw_env = comp_data.get("environment", target_comp.environment)
-            try:
-                comp_env = models.Environment(raw_env) if isinstance(raw_env, str) else raw_env
-            except Exception:
-                comp_env = target_comp.environment
+                raw_env = comp_data.get("environment", target_comp.environment)
+                try:
+                    comp_env = models.Environment(raw_env) if isinstance(raw_env, str) else raw_env
+                except Exception:
+                    comp_env = target_comp.environment
 
-            raw_crit = comp_data.get("criticality", target_comp.criticality)
-            try:
-                comp_crit = models.Criticality(raw_crit) if isinstance(raw_crit, str) else raw_crit
-            except Exception:
-                comp_crit = target_comp.criticality
+                raw_crit = comp_data.get("criticality", target_comp.criticality)
+                try:
+                    comp_crit = models.Criticality(raw_crit) if isinstance(raw_crit, str) else raw_crit
+                except Exception:
+                    comp_crit = target_comp.criticality
 
-            # India-first default region
-            comp_loc = comp_data.get("location", target_comp.location or "ap-south-1")
+                comp_loc = comp_data.get("location", target_comp.location or "ap-south-1")
 
-            new_comp = models.Component(
-                id=new_comp_id,
-                name=comp_data.get("name", f"{target_comp.name} Replica"),
-                type=comp_type,
-                environment=comp_env,
-                criticality=comp_crit,
-                location=comp_loc,
-                owner=comp_data.get("owner", "Digital Twin Engine"),
-                status=models.Status.active,
-                cost_per_month=float(comp_data.get("cost_per_month", target_comp.cost_per_month or 0.0)),
-                discovery_source=applied_source,
-                metadata_col={"proposed_solution_id": solution_id, "is_proposed": is_live}
-            )
-            db.add(new_comp)
-            db.flush()
-            applied_comp_ids.append(new_comp_id)
+                new_comp = models.Component(
+                    id=new_comp_id,
+                    name=comp_data.get("name", f"{target_comp.name} Replica"),
+                    type=comp_type,
+                    environment=comp_env,
+                    criticality=comp_crit,
+                    location=comp_loc,
+                    owner=comp_data.get("owner", "Digital Twin Engine"),
+                    status=models.Status.active,
+                    cost_per_month=float(comp_data.get("cost_per_month", target_comp.cost_per_month or 0.0)),
+                    discovery_source=applied_source,
+                    source_environment=target_comp.source_environment or "manual",
+                    metadata_col={"proposed_solution_id": solution_id, "is_proposed": is_live}
+                )
+                db.add(new_comp)
+                db.flush()
+                applied_comp_ids.append(new_comp_id)
 
         # Add dependencies
-        deps_list = changes.get("dependencies", [])
+        deps_list = changes.get("dependencies_to_add") or changes.get("dependencies", [])
         for d in deps_list:
-            src = d.get("source_component_id")
-            tgt = d.get("target_component_id")
+            src = d.get("source_component_id") or d.get("source") or d.get("source_id")
+            tgt = d.get("target_component_id") or d.get("target") or d.get("target_id")
             if src and tgt:
                 existing_d = db.query(models.Dependency).filter(
                     (models.Dependency.source_component_id == src) & 
@@ -523,9 +701,12 @@ def apply_feasible_solution(
                         id=f"dep-{uuid.uuid4().hex[:8]}",
                         source_component_id=src,
                         target_component_id=tgt,
+                        source_id=src,
+                        target_id=tgt,
                         relationship_type=rel_type,
                         criticality=dep_crit,
                         source=applied_source,
+                        source_environment=target_comp.source_environment or "manual",
                         discovery_source=applied_source,
                         metadata_col={"proposed_solution_id": solution_id, "is_proposed": is_live}
                     )
@@ -533,25 +714,33 @@ def apply_feasible_solution(
 
         db.commit()
 
-    elif change_type == "update_component":
-        comp_id = changes.get("component_id", target_component_id)
-        c_to_update = db.query(models.Component).filter_by(id=comp_id).first()
-        if c_to_update:
-            updates = changes.get("updates", {})
-            if "cost_per_month" in updates:
-                c_to_update.cost_per_month = float(updates["cost_per_month"])
-            if "assumptions" in updates:
-                meta = dict(c_to_update.metadata_col or {})
-                meta_assumptions = dict(meta.get("assumptions", {}))
-                meta_assumptions.update(updates["assumptions"])
-                meta["assumptions"] = meta_assumptions
-                c_to_update.metadata_col = meta
-            if is_live:
-                meta = dict(c_to_update.metadata_col or {})
-                meta["is_proposed"] = True
-                c_to_update.metadata_col = meta
-            db.commit()
-            applied_comp_ids.append(comp_id)
+    if change_type == "update_component" or "components_to_modify" in changes:
+        mod_items = changes.get("components_to_modify") or (
+            [{"id": changes.get("component_id", target_component_id), "changes": changes.get("updates", {})}]
+            if changes.get("updates") else []
+        )
+        for mod_entry in mod_items:
+            comp_id = mod_entry.get("id", target_component_id)
+            c_to_update = db.query(models.Component).filter_by(id=comp_id).first()
+            if c_to_update:
+                updates = mod_entry.get("changes", mod_entry.get("updates", {}))
+                if "cost_per_month" in updates:
+                    try:
+                        c_to_update.cost_per_month = float(updates["cost_per_month"])
+                    except Exception:
+                        pass
+                if "assumptions" in updates:
+                    meta = dict(c_to_update.metadata_col or {})
+                    meta_assumptions = dict(meta.get("assumptions", {}))
+                    meta_assumptions.update(updates["assumptions"])
+                    meta["assumptions"] = meta_assumptions
+                    c_to_update.metadata_col = meta
+                if is_live:
+                    meta = dict(c_to_update.metadata_col or {})
+                    meta["is_proposed"] = True
+                    c_to_update.metadata_col = meta
+                db.commit()
+                applied_comp_ids.append(comp_id)
 
     # 3. Capture AFTER state metrics and re-simulate on target_component_id
     after_components_count = db.query(models.Component).count()

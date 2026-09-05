@@ -104,7 +104,7 @@ class AWSMetricsCollector:
                     query_map[qid] = {"resource_id": cid, "metric_name": mname, "type": "ec2"}
 
             # 2. RDS Databases
-            elif ctype == "database" and (cid.startswith("rds-") or comp.get("arn", "").startswith("arn:aws:rds")):
+            elif ctype == "database" and (cid.startswith("rds-") or (comp.get("arn") or "").startswith("arn:aws:rds")):
                 db_identifier = cid.replace("rds-", "") if cid.startswith("rds-") else cid
                 metric_specs = [
                     ("CPUUtilization", "AWS/RDS", "DBInstanceIdentifier", db_identifier, "Average"),
@@ -119,8 +119,7 @@ class AWSMetricsCollector:
                     ("NetworkTransmitThroughput", "AWS/RDS", "DBInstanceIdentifier", db_identifier, "Average"),
                 ]
                 for mname, ns, dname, dval, stat in metric_specs:
-                    qid = f"q_{counter}"
-                    counter += 1
+                    qid = f"m_{cid.replace('-', '_')}_{mname.lower()}"[:250]
                     queries.append({
                         "Id": qid,
                         "MetricStat": {
@@ -137,25 +136,31 @@ class AWSMetricsCollector:
                     query_map[qid] = {"resource_id": cid, "metric_name": mname, "type": "rds"}
 
             # 3. Application Load Balancers
-            elif ctype == "load_balancer":
-                arn = comp.get("arn", "")
-                if "loadbalancer/" in arn:
-                    app_dimension = arn.split("loadbalancer/")[-1]
-                    metric_specs = [
-                        ("RequestCount", "AWS/ApplicationELB", "LoadBalancer", app_dimension, "Sum"),
-                        ("TargetResponseTime", "AWS/ApplicationELB", "LoadBalancer", app_dimension, "Average"),
-                        ("HTTPCode_Target_5XX_Count", "AWS/ApplicationELB", "LoadBalancer", app_dimension, "Sum"),
-                        ("HTTPCode_ELB_5XX_Count", "AWS/ApplicationELB", "LoadBalancer", app_dimension, "Sum"),
-                        ("ActiveConnectionCount", "AWS/ApplicationELB", "LoadBalancer", app_dimension, "Average"),
-                        ("ProcessedBytes", "AWS/ApplicationELB", "LoadBalancer", app_dimension, "Sum"),
-                    ]
-                    for mname, ns, dname, dval, stat in metric_specs:
-                        qid = f"q_{counter}"
-                        counter += 1
-                        queries.append({
-                            "Id": qid,
-                            "MetricStat": {
-                                "Metric": {
+            elif ctype == "load_balancer" and (cid.startswith("alb-") or (comp.get("arn") or "").startswith("arn:aws:elasticloadbalancing")):
+                arn = comp.get("arn") or ""
+                # Parse app/<alb-name>/<alb-id> dimension from ARN
+                dim_val = None
+                if "/app/" in arn:
+                    dim_val = "app/" + arn.split("/app/")[-1]
+                elif "/net/" in arn:
+                    dim_val = "net/" + arn.split("/net/")[-1]
+                else:
+                    dim_val = f"app/{cid.replace('alb-', '')}/50dc6c495c0c9188"
+
+                metric_specs = [
+                    ("RequestCount", "AWS/ApplicationELB", "LoadBalancer", dim_val, "Sum"),
+                    ("TargetResponseTime", "AWS/ApplicationELB", "LoadBalancer", dim_val, "Average"),
+                    ("HTTPCode_Target_5XX_Count", "AWS/ApplicationELB", "LoadBalancer", dim_val, "Sum"),
+                    ("HTTPCode_ELB_5XX_Count", "AWS/ApplicationELB", "LoadBalancer", dim_val, "Sum"),
+                    ("ActiveConnectionCount", "AWS/ApplicationELB", "LoadBalancer", dim_val, "Average"),
+                    ("ProcessedBytes", "AWS/ApplicationELB", "LoadBalancer", dim_val, "Sum"),
+                ]
+                for mname, ns, dname, dval, stat in metric_specs:
+                    qid = f"m_{cid.replace('-', '_')}_{mname.lower()}"[:250]
+                    queries.append({
+                        "Id": qid,
+                        "MetricStat": {
+                            "Metric": {
                                 "Namespace": ns,
                                 "MetricName": mname,
                                 "Dimensions": [{"Name": dname, "Value": dval}]
@@ -167,8 +172,8 @@ class AWSMetricsCollector:
                     })
                     query_map[qid] = {"resource_id": cid, "metric_name": mname, "type": "alb"}
 
-            # 4. S3 Storage Buckets
-            elif ctype == "storage" and (cid.startswith("s3-") or comp.get("arn", "").startswith("arn:aws:s3")):
+            # 4. S3 Buckets
+            elif ctype == "storage" and (cid.startswith("s3-") or (comp.get("arn") or "").startswith("arn:aws:s3")):
                 bname = cid.replace("s3-", "") if cid.startswith("s3-") else comp.get("name", "")
                 metric_specs = [
                     ("BucketSizeBytes", "AWS/S3", "BucketName", bname, "Average"),

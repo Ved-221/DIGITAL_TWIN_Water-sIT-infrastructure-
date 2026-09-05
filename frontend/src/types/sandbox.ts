@@ -6,6 +6,8 @@ export interface SandboxApplyRequest {
   source_environment?: string;
   target_component_id: string;
   candidate_id?: string | null;
+  id?: string | null;
+  solution_id?: string | null;
   action?: string;
   candidate_data?: Record<string, any> | null;
   sandbox_env_id?: string;

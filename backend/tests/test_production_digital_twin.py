@@ -42,6 +42,12 @@ def test_standard_metrics_and_recommendations_aliases():
     comps_res = client.get("/api/twin/components")
     assert comps_res.status_code == 200
     comps = comps_res.json()
+    if not comps:
+        from database import SessionLocal
+        import seed
+        db = SessionLocal()
+        seed.seed_data(db)
+        comps = client.get("/api/twin/components").json()
     assert len(comps) > 0
     cid = comps[0]["id"]
 

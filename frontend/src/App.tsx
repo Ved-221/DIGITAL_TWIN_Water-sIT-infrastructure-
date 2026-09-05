@@ -16,8 +16,10 @@ import classNames from 'classnames';
 import { 
   AlertTriangle, LayoutDashboard, Share2, Server, 
   RefreshCw, Key, XCircle, Search, RotateCcw, Plus, Link, Trash2,
-  Sparkles, CheckCircle2
+  Sparkles, CheckCircle2, Layers, Cloud
 } from 'lucide-react';
+
+import { twinApi } from './api/twinApi';
 
 import { AWSConnectModal } from './components/AWSConnectModal';
 import { BuildTwinModal } from './components/BuildTwinModal';
@@ -27,6 +29,10 @@ import { InspectorDrawer } from './components/InspectorDrawer';
 import { ManualResourceModal } from './components/ManualResourceModal';
 import { ManualDependencyModal } from './components/ManualDependencyModal';
 import { WhatIfScenarioPanel } from './components/WhatIfScenarioPanel';
+import { WhatIfErrorBoundary } from './components/WhatIfErrorBoundary';
+import { SandboxTransformationBar } from './components/SandboxTransformationBar';
+import { sandboxApi } from './api/sandboxApi';
+import type { SandboxApplyResponse } from './types/sandbox';
 import { calculateTopologyLayout } from './utils/topologyLayout';
 import { formatINR, getRegionDisplayName } from './utils/localization';
 
@@ -70,6 +76,12 @@ const CustomNode = ({ data, selected }: { data: any; selected: boolean }) => {
 
   return (
     <div
+      onClick={(e) => {
+        if (data?.onSelect) {
+          e.stopPropagation();
+          data.onSelect(data);
+        }
+      }}
       className={classNames(
         'px-4 py-3 rounded-xl border transition-all duration-200 shadow-lg cursor-pointer min-w-[180px]',
         isBlastRadius
@@ -152,18 +164,24 @@ export default function App() {
   const [costReport, setCostReport] = useState<any>(null);
   const [healthReport, setHealthReport] = useState<any>(null);
   
-  // Environment selection state: null = Startup Selection Screen, 'aws' = AWS Flow, 'manual' = Manual Builder
-  const [selectedEnv, setSelectedEnv] = useState<'aws' | 'manual' | null>(() => {
+  // Environment selection state: null = Startup Selection Screen, 'aws' = AWS Flow, 'manual' = Manual Builder, 'sandbox' = Sandbox Transformation
+  const [selectedEnv, setSelectedEnv] = useState<'aws' | 'manual' | 'sandbox' | null>(() => {
     const saved = sessionStorage.getItem('infratwin_env');
     if (saved === 'aws' || saved === 'manual') return saved;
+    // Sandbox is ephemeral and must never become the default startup environment
+    if (saved === 'sandbox') sessionStorage.removeItem('infratwin_env');
     return null;
   });
+
+  const [activeSandboxResult, setActiveSandboxResult] = useState<SandboxApplyResponse | null>(null);
+  const [isSandboxActionLoading, setIsSandboxActionLoading] = useState<boolean>(false);
 
   // Modals state
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
   const [isResourceModalOpen, setIsResourceModalOpen] = useState(false);
   const [isDependencyModalOpen, setIsDependencyModalOpen] = useState(false);
   const [isBuildTwinModalOpen, setIsBuildTwinModalOpen] = useState(false);
+  const [buildTwinInitialTab, setBuildTwinInitialTab] = useState<'describe' | 'structured'>('describe');
   const [whatIfTargetNode, setWhatIfTargetNode] = useState<any | null>(null);
   const [editResource, setEditResource] = useState<any | null>(null);
   const [pendingSourceId, setPendingSourceId] = useState<string | null>(null);
@@ -173,10 +191,12 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (overrideEnv?: string | null) => {
     setLoading(true);
     setErrorMessage(null);
     try {
+      const activeEnv = overrideEnv !== undefined ? overrideEnv : selectedEnv;
+
       // 1. Fetch Digital Twin Environment & Discovery State
       const stateRes = await fetch(`${API_BASE}/twin/state`);
       let curState: TwinState = {
@@ -192,8 +212,8 @@ export default function App() {
         setTwinState(curState);
       }
 
-      // If backend explicitly reset to unconnected, reset client selection as well
-      if (curState.mode === 'unconnected') {
+      // If backend explicitly reset to unconnected and not viewing sandbox
+      if (curState.mode === 'unconnected' && !activeEnv) {
         setSelectedEnv(null);
         sessionStorage.removeItem('infratwin_env');
         setRawComponents([]);
@@ -209,7 +229,7 @@ export default function App() {
       }
 
       // If awaiting discovery without components, clear nodes & edges
-      if (curState.mode === 'live' && curState.discovery_status === 'idle') {
+      if (curState.mode === 'live' && curState.discovery_status === 'idle' && !activeEnv) {
         setRawComponents([]);
         setRawDependencies([]);
         setNodes([]);
@@ -222,11 +242,12 @@ export default function App() {
         return;
       }
 
-      // 2. Fetch Active Components, Dependencies, and Stats
+      // 2. Fetch Active Components, Dependencies, and Stats for activeEnv
+      const envParam = activeEnv ? `?source_environment=${encodeURIComponent(activeEnv)}` : '';
       const [compsRes, depsRes, statsRes] = await Promise.all([
-        fetch(`${API_BASE}/twin/components`),
-        fetch(`${API_BASE}/twin/dependencies`),
-        fetch(`${API_BASE}/twin/stats`),
+        fetch(`${API_BASE}/twin/components${envParam}`),
+        fetch(`${API_BASE}/twin/dependencies${envParam}`),
+        fetch(`${API_BASE}/twin/stats${envParam}`),
       ]);
 
       const comps = await compsRes.json();
@@ -237,11 +258,9 @@ export default function App() {
       setRawDependencies(deps);
       setStats(st);
 
-      // Restore active environment from backend if resources exist
-      if (comps.length > 0) {
-        const restoredEnv = curState.mode === 'live' ? 'aws' : 'manual';
-        setSelectedEnv(restoredEnv);
-        sessionStorage.setItem('infratwin_env', restoredEnv);
+      // Only keep selectedEnv if already set. Never force an environment if activeEnv is null (startup screen)
+      if (comps.length === 0 && activeEnv) {
+        // Clear graph if active environment has 0 components
       }
 
       // If no components exist, clear nodes
@@ -300,7 +319,16 @@ export default function App() {
         const layoutResult = calculateTopologyLayout(comps, deps, currentNodes);
         setEdges(layoutResult.edges);
         setHasCycle(layoutResult.hasCycle);
-        return layoutResult.nodes;
+        return layoutResult.nodes.map((node) => ({
+          ...node,
+          data: {
+            ...node.data,
+            onSelect: (nodeData: any) => {
+              setSelectedNode(nodeData);
+              setSimResult(null);
+            }
+          }
+        }));
       });
     } catch (err: any) {
       console.error("Error fetching twin data", err);
@@ -308,7 +336,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [setNodes, setEdges]);
+  }, [setNodes, setEdges, selectedEnv]);
 
   useEffect(() => {
     fetchData();
@@ -346,23 +374,50 @@ export default function App() {
     setSyncing(true);
     setErrorMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/aws/sync`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          mode: 'replace', 
-          use_synthetic: false, 
-          region: twinState?.region || 'us-east-1' 
-        })
-      });
-      const data = await res.json();
-      if (data.success) {
-        await fetchData();
+      let res: Response;
+      try {
+        res = await fetch(`${API_BASE}/aws/sync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            mode: 'replace', 
+            use_synthetic: false, 
+            region: twinState?.region || 'ap-south-1' 
+          })
+        });
+      } catch (netErr: any) {
+        setErrorMessage('Cannot connect to Digital Twin backend at http://localhost:8000. Verify the FastAPI server is running.');
+        return;
+      }
+
+      let data: any;
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        if (!res.ok) {
+          setErrorMessage(`AWS discovery failed with server status ${res.status} (${res.statusText}).`);
+        } else {
+          setErrorMessage('AWS discovery returned an unexpected response format.');
+        }
+        return;
+      }
+
+      if (res.ok && data?.success) {
+        setSelectedEnv('aws');
+        sessionStorage.setItem('infratwin_env', 'aws');
+        await fetchData('aws');
       } else {
-        setErrorMessage(data.message || 'AWS discovery failed. Verify IAM permissions and connectivity.');
+        const rawMsg = data?.message || data?.detail || 'AWS discovery failed.';
+        if (rawMsg.includes('Authentication failed') || rawMsg.includes('credentials') || rawMsg.includes('AccessDenied') || rawMsg.includes('AuthFailure') || rawMsg.includes('No AWS credentials')) {
+          setErrorMessage(`AWS authentication failed: ${rawMsg}`);
+        } else if (rawMsg.includes('UnauthorizedOperation') || rawMsg.includes('AccessDeniedException') || rawMsg.includes('permission')) {
+          setErrorMessage(`AWS credentials are valid, but discovery permission is missing: ${rawMsg}`);
+        } else {
+          setErrorMessage(`AWS discovery failed: ${rawMsg}`);
+        }
       }
     } catch (err: any) {
-      setErrorMessage(`AWS discovery network error: ${err.message}`);
+      setErrorMessage(`AWS discovery error: ${err.message || 'Unknown error'}`);
     } finally {
       setSyncing(false);
     }
@@ -488,18 +543,29 @@ export default function App() {
   const handleSwitchToAWS = async () => {
     setSelectedEnv('aws');
     sessionStorage.setItem('infratwin_env', 'aws');
+    setLoading(true);
+    setErrorMessage(null);
     try {
       const res = await fetch(`${API_BASE}/aws/activate`, { method: 'POST' });
-      if (res.ok) {
-        setSelectedNode(null);
-        setSimResult(null);
-        await fetchData();
-        if (!twinState?.authenticated && !twinState?.account_id) {
-          setIsConnectModalOpen(true);
+      const actData = await res.json().catch(() => ({}));
+      setSelectedNode(null);
+      setSimResult(null);
+
+      if (actData.authenticated) {
+        // If authenticated and no components exist yet, run discovery to build the twin!
+        if ((actData.components_count || 0) === 0) {
+          await handleDiscoverInfrastructure();
+        } else {
+          await fetchData('aws');
         }
+      } else {
+        await fetchData('aws');
+        setIsConnectModalOpen(true);
       }
     } catch (e: any) {
       setErrorMessage(`Switch to AWS error: ${e.message}`);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -512,7 +578,7 @@ export default function App() {
       if (res.ok) {
         setSelectedNode(null);
         setSimResult(null);
-        await fetchData();
+        await fetchData('manual');
       }
     } catch (e: any) {
       setErrorMessage(`Switch to Manual error: ${e.message}`);
@@ -552,6 +618,36 @@ export default function App() {
     } finally {
       setSyncing(false);
     }
+  };
+
+  // Loads a 1-click architecture template into the Manual Digital Twin
+  const handleLoadTemplate = async (tmpl: { label: string; text: string; domain: string }) => {
+    setSelectedEnv('manual');
+    sessionStorage.setItem('infratwin_env', 'manual');
+    setSyncing(true);
+    setErrorMessage(null);
+    try {
+      const parseRes = await twinApi.parseDescription({ description: tmpl.text, domain: tmpl.domain });
+      await twinApi.applyParsedTwin({
+        domain: parseRes.domain || tmpl.domain,
+        components: parseRes.components,
+        dependencies: parseRes.dependencies,
+        clear_existing: true,
+      });
+      await fetchData('manual');
+      setSuccessMessage(`Loaded "${tmpl.label}" template into Manual Digital Twin.`);
+    } catch (err: any) {
+      setErrorMessage(`Failed to load template: ${err.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  // Switch back to the 4-options selection screen without deleting data
+  const handleViewAllOptions = () => {
+    setSelectedEnv(null);
+    sessionStorage.removeItem('infratwin_env');
+    fetchData(null);
   };
 
   // Runs deterministic simulation & grounded AI explanation
@@ -602,8 +698,64 @@ export default function App() {
     }
   };
 
+  const handleApplySolutionToSandbox = async (result: SandboxApplyResponse) => {
+    setActiveSandboxResult(result);
+    setSelectedEnv('sandbox');
+    // Sandbox is ephemeral and must NOT be persisted in sessionStorage
+    setWhatIfTargetNode(null);
+    setSuccessMessage(`Transformed Digital Twin in Sandbox: Applied "${result.strategy_type?.replace(/_/g, ' ') || 'candidate solution'}". Graph updated.`);
+    await fetchData(result.sandbox_id || 'sandbox');
+  };
+
+  const handleSandboxRollback = async () => {
+    if (!activeSandboxResult) return;
+    setIsSandboxActionLoading(true);
+    try {
+      const rollbackRes = await sandboxApi.rollback({
+        snapshot_id: activeSandboxResult.snapshot_id,
+        sandbox_id: activeSandboxResult.sandbox_id,
+      });
+      const baselineEnv = activeSandboxResult.source_environment === 'aws' ? 'aws' : 'manual';
+      setSelectedEnv(baselineEnv);
+      sessionStorage.setItem('infratwin_env', baselineEnv);
+      setActiveSandboxResult(null);
+      setSuccessMessage(`Successfully rolled back sandbox to original baseline architecture. Restored ${rollbackRes.components_count} components.`);
+      await fetchData(baselineEnv);
+    } catch (err: any) {
+      setErrorMessage(`Failed to rollback sandbox: ${err.message}`);
+    } finally {
+      setIsSandboxActionLoading(false);
+    }
+  };
+
+  const handleSandboxAccept = async () => {
+    if (!activeSandboxResult) return;
+    setIsSandboxActionLoading(true);
+    try {
+      await sandboxApi.accept({
+        snapshot_id: activeSandboxResult.snapshot_id,
+        sandbox_id: activeSandboxResult.sandbox_id,
+      });
+      if (activeSandboxResult.source_environment === 'manual') {
+        setSelectedEnv('manual');
+        sessionStorage.setItem('infratwin_env', 'manual');
+        await fetchData('manual');
+        setSuccessMessage('Transformation accepted as approved Digital Twin architecture and updated baseline.');
+      } else {
+        await fetchData(activeSandboxResult.sandbox_id || 'sandbox');
+        setSuccessMessage('Transformation accepted in sandbox. Live AWS infrastructure remains strictly read-only.');
+      }
+      setActiveSandboxResult(null);
+    } catch (err: any) {
+      setErrorMessage(`Failed to accept sandbox: ${err.message}`);
+    } finally {
+      setIsSandboxActionLoading(false);
+    }
+  };
+
   const isLiveAWS = selectedEnv === 'aws';
   const isManual = selectedEnv === 'manual';
+  const isSandbox = selectedEnv === 'sandbox';
   const hasResources = rawComponents.length > 0;
 
   return (
@@ -627,7 +779,12 @@ export default function App() {
 
           {/* Dynamic Mode Badge */}
           <div className="flex items-center gap-2.5">
-            {isLiveAWS ? (
+            {isSandbox ? (
+              <div className="flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-purple-950 text-purple-300 border border-purple-700 shadow-sm">
+                <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse"></span>
+                <span>SANDBOX SIMULATION • Transformed Architecture • {rawComponents.length} Resources</span>
+              </div>
+            ) : isLiveAWS ? (
               <div className="flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-950 text-emerald-300 border border-emerald-800 shadow-sm">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                 <span>LIVE AWS • Account {twinState?.account_id || 'Active'} ({getRegionDisplayName(twinState?.region || 'ap-south-1')}) • {rawComponents.length} Resources</span>
@@ -682,6 +839,14 @@ export default function App() {
                 <span>Switch to Manual</span>
               </button>
               <button
+                onClick={handleViewAllOptions}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-slate-300 border border-slate-700 transition shadow-sm"
+                title="View all 4 twin creation options and templates"
+              >
+                <Layers size={13} className="text-blue-400" />
+                <span>All Options</span>
+              </button>
+              <button
                 onClick={() => setIsConnectModalOpen(true)}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-xs font-medium text-slate-200 border border-slate-600 transition shadow-sm"
               >
@@ -729,6 +894,14 @@ export default function App() {
               >
                 <Key size={13} />
                 <span>Switch to AWS</span>
+              </button>
+              <button
+                onClick={handleViewAllOptions}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-medium text-slate-300 border border-slate-700 transition shadow-sm"
+                title="View all 4 twin creation options and templates"
+              >
+                <Layers size={13} className="text-blue-400" />
+                <span>All Options</span>
               </button>
               {rawComponents.length > 0 && (
                 <button
@@ -813,9 +986,9 @@ export default function App() {
       )}
 
       {/* Main Content Area */}
-      {selectedEnv === null || !hasResources ? (
+      {selectedEnv === null ? (
         <EmptyState
-          mode={selectedEnv === 'aws' ? 'live' : selectedEnv === 'manual' ? 'manual' : 'unconnected'}
+          mode="unconnected"
           discoveryStatus={twinState?.discovery_status || 'idle'}
           accountId={twinState?.account_id}
           region={twinState?.region}
@@ -826,7 +999,10 @@ export default function App() {
           onSelectAWS={handleSelectAWS}
           onSelectManual={handleSelectManual}
           onAddResource={() => { setEditResource(null); setIsResourceModalOpen(true); }}
-          onOpenBuildTwin={() => setIsBuildTwinModalOpen(true)}
+          onOpenBuildTwin={() => { setBuildTwinInitialTab('describe'); setIsBuildTwinModalOpen(true); }}
+          onOpenDescribeBuild={() => { setBuildTwinInitialTab('describe'); setIsBuildTwinModalOpen(true); }}
+          onOpenImportJson={() => { setBuildTwinInitialTab('structured'); setIsBuildTwinModalOpen(true); }}
+          onLoadTemplate={handleLoadTemplate}
           loading={syncing || loading}
         />
       ) : activeTab === 'dashboard' ? (
@@ -853,6 +1029,134 @@ export default function App() {
           
           {/* React Flow Topology Canvas */}
           <div className="flex-1 h-full bg-slate-900 relative">
+            
+            {/* Floating Sandbox Transformation & Before/After Bar */}
+            {activeSandboxResult && (
+              <SandboxTransformationBar
+                sandboxResult={activeSandboxResult}
+                isLoading={isSandboxActionLoading}
+                onAccept={handleSandboxAccept}
+                onRollback={handleSandboxRollback}
+              />
+            )}
+
+            {/* In-Canvas Discovering Progress Overlay */}
+            {syncing && (
+              <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 backdrop-blur-sm z-30 p-6">
+                <div className="max-w-md w-full text-center space-y-5 bg-slate-800 border border-slate-700 p-8 rounded-2xl shadow-2xl">
+                  <div className="w-14 h-14 rounded-2xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center mx-auto text-blue-400">
+                    <RefreshCw size={28} className="animate-spin text-blue-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">Discovering AWS Infrastructure</h3>
+                    <p className="text-xs text-slate-400 mt-1">
+                      Querying live AWS APIs in <span className="font-mono text-blue-300 font-semibold">{twinState?.region || 'ap-south-1'}</span>...
+                    </p>
+                  </div>
+                  <div className="space-y-2 text-left bg-slate-900/60 p-4 rounded-xl border border-slate-700/60 text-xs">
+                    <div className="flex items-center gap-2 text-slate-300">
+                      <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
+                      <span>1. Describing VPCs, Subnets & Security Groups</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-slate-300">
+                      <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></span>
+                      <span>2. Describing EC2 Compute & RDS Databases</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-slate-300">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                      <span>3. Building Deterministic Dependency Graph</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Empty AWS Canvas Overlay when 0 components imported */}
+            {isLiveAWS && !hasResources && !syncing && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 p-6">
+                <div className="pointer-events-auto max-w-md w-full text-center space-y-4 bg-slate-800/95 border border-slate-700/80 p-8 rounded-2xl shadow-2xl backdrop-blur">
+                  <div className="w-14 h-14 rounded-2xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center mx-auto text-blue-400">
+                    <Cloud size={28} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <h3 className="text-lg font-bold text-white">Live AWS Environment</h3>
+                    <p className="text-xs text-slate-400">
+                      Connected to Account <span className="font-mono text-emerald-400 font-semibold">{twinState?.account_id || '881776924433'}</span> ({getRegionDisplayName(twinState?.region || 'ap-south-1')})
+                    </p>
+                    <p className="text-xs text-slate-400">
+                      No AWS infrastructure components imported yet. Click below to discover your live VPCs, subnets, and compute.
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-2 pt-2">
+                    <button
+                      onClick={handleDiscoverInfrastructure}
+                      disabled={syncing}
+                      className="w-full py-2.5 px-4 bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 rounded-xl font-bold text-xs text-white shadow-md shadow-blue-900/30 flex items-center justify-center gap-2 transition disabled:opacity-50"
+                    >
+                      <Search size={15} />
+                      <span>Discover Live AWS Infrastructure</span>
+                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setIsConnectModalOpen(true)}
+                        className="flex-1 py-2 px-3 bg-slate-700 hover:bg-slate-600 rounded-xl font-medium text-xs text-slate-200 border border-slate-600 transition flex items-center justify-center gap-1.5"
+                      >
+                        <Key size={13} className="text-amber-400" />
+                        <span>Switch Region</span>
+                      </button>
+                      <button
+                        onClick={handleViewAllOptions}
+                        className="flex-1 py-2 px-3 bg-slate-800 hover:bg-slate-700 rounded-xl font-medium text-xs text-slate-300 border border-slate-700 transition flex items-center justify-center gap-1.5"
+                      >
+                        <Layers size={13} className="text-blue-400" />
+                        <span>All Options</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Empty Manual Canvas Overlay when 0 components added */}
+            {isManual && !hasResources && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10 p-6">
+                <div className="pointer-events-auto max-w-md w-full text-center space-y-4 bg-slate-800/95 border border-slate-700/80 p-8 rounded-2xl shadow-2xl backdrop-blur">
+                  <div className="w-14 h-14 rounded-2xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center mx-auto text-cyan-400">
+                    <Server size={28} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <h3 className="text-lg font-bold text-white">Manual Canvas Active</h3>
+                    <p className="text-xs text-slate-400">
+                      Your custom infrastructure canvas is blank. Add nodes, describe your system using plain English, or load an architecture template.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2.5 pt-2">
+                    <button
+                      onClick={() => { setEditResource(null); setIsResourceModalOpen(true); }}
+                      className="flex-1 py-2.5 px-3 bg-cyan-600 hover:bg-cyan-500 rounded-xl font-bold text-xs text-white shadow-md shadow-cyan-900/30 flex items-center justify-center gap-1.5 transition"
+                    >
+                      <Plus size={15} />
+                      <span>+ Add Resource</span>
+                    </button>
+                    <button
+                      onClick={() => { setBuildTwinInitialTab('describe'); setIsBuildTwinModalOpen(true); }}
+                      className="flex-1 py-2.5 px-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl font-bold text-xs text-white shadow-md shadow-indigo-900/30 flex items-center justify-center gap-1.5 transition"
+                    >
+                      <Sparkles size={14} />
+                      <span>Describe (NLP)</span>
+                    </button>
+                  </div>
+                  <button
+                    onClick={handleViewAllOptions}
+                    className="w-full py-2 px-3 bg-slate-700 hover:bg-slate-600 rounded-xl font-medium text-xs text-slate-300 border border-slate-600 transition flex items-center justify-center gap-1.5"
+                  >
+                    <Layers size={13} className="text-blue-400" />
+                    <span>View 1-Click Templates & Options</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             <ReactFlow
               nodes={nodes}
               edges={edges}
@@ -876,7 +1180,7 @@ export default function App() {
             </ReactFlow>
 
             {/* Quick builder floating hint in Manual Mode */}
-            {isManual && (
+            {isManual && hasResources && (
               <div className="absolute bottom-4 left-4 z-10 bg-slate-800/90 backdrop-blur border border-slate-700/80 px-3 py-2 rounded-xl text-[11px] text-slate-300 shadow-xl flex items-center gap-3">
                 <span>Drag between node handles to create dependencies • Click an edge to delete it</span>
                 <button
@@ -923,7 +1227,7 @@ export default function App() {
         onConnected={async () => {
           setSelectedEnv('aws');
           sessionStorage.setItem('infratwin_env', 'aws');
-          await fetchData();
+          await handleDiscoverInfrastructure();
         }}
         apiBase={API_BASE}
       />
@@ -956,6 +1260,7 @@ export default function App() {
       {/* Build Digital Twin Modal */}
       <BuildTwinModal
         isOpen={isBuildTwinModalOpen}
+        initialTab={buildTwinInitialTab}
         onClose={() => setIsBuildTwinModalOpen(false)}
         onTwinCreated={async (result) => {
           setSelectedEnv('manual');
@@ -968,12 +1273,21 @@ export default function App() {
       />
 
       {/* What-If Scenario Engine Panel */}
-      <WhatIfScenarioPanel
-        isOpen={Boolean(whatIfTargetNode)}
-        targetNode={whatIfTargetNode}
-        sourceEnvironment={selectedEnv || 'aws'}
-        onClose={() => setWhatIfTargetNode(null)}
-      />
+      {whatIfTargetNode && (
+        <WhatIfErrorBoundary onClose={() => setWhatIfTargetNode(null)}>
+          <WhatIfScenarioPanel
+            isOpen={Boolean(whatIfTargetNode)}
+            targetNode={whatIfTargetNode}
+            rawDependencies={rawDependencies}
+            rawComponents={rawComponents}
+            metricsMap={metricsMap}
+            recommendations={recommendations}
+            sourceEnvironment={selectedEnv || 'aws'}
+            onClose={() => setWhatIfTargetNode(null)}
+            onApplySolutionToSandbox={handleApplySolutionToSandbox}
+          />
+        </WhatIfErrorBoundary>
+      )}
 
     </div>
   );

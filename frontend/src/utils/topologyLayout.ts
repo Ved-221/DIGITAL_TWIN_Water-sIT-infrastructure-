@@ -30,12 +30,40 @@ export const getEdgeStyle = (relType: string) => {
       };
     case 'routes_traffic_to':
     case 'routes_to':
+    case 'routes_traffic':
       return {
         stroke: '#06b6d4', // Cyan
         strokeWidth: 2.5,
         strokeDasharray: undefined,
         color: '#06b6d4',
         labelBg: '#164e63',
+        animated: true,
+      };
+    case 'replicates_from':
+      return {
+        stroke: '#8b5cf6', // Violet
+        strokeWidth: 2,
+        strokeDasharray: '4,4',
+        color: '#8b5cf6',
+        labelBg: '#4c1d95',
+        animated: true,
+      };
+    case 'buffers_to':
+      return {
+        stroke: '#6366f1', // Indigo
+        strokeWidth: 2,
+        strokeDasharray: undefined,
+        color: '#6366f1',
+        labelBg: '#312e81',
+        animated: true,
+      };
+    case 'syncs_with':
+      return {
+        stroke: '#14b8a6', // Teal
+        strokeWidth: 2,
+        strokeDasharray: '4,4',
+        color: '#14b8a6',
+        labelBg: '#134e4a',
         animated: true,
       };
     case 'storage_access':

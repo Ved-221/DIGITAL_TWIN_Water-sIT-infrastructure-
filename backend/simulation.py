@@ -69,6 +69,15 @@ def build_graph(db: Session, source_environment: str = "aws", mode: Optional[str
             (models.Dependency.source_environment == "manual") | 
             (models.Dependency.source.in_(["manual", "user_description"]))
         ).all()
+    elif source_environment == "aws":
+        components = db.query(models.Component).filter(
+            (models.Component.source_environment == "aws") | 
+            (models.Component.discovery_source.in_(["aws", "aws_api", "hybrid", "aws_synthetic"]))
+        ).all()
+        dependencies = db.query(models.Dependency).filter(
+            (models.Dependency.source_environment == "aws") | 
+            (models.Dependency.source.in_(["aws", "aws_api", "hybrid", "aws_synthetic"]))
+        ).all()
     else:
         components = db.query(models.Component).filter(
             (models.Component.source_environment == source_environment) | 

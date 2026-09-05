@@ -125,6 +125,35 @@ def parse_with_rule_engine(description: str, domain: str = "general") -> Dict[st
                 })
             continue
 
+        # Pattern: "Load balancer connected to two application servers" / "ALB routes to 2 servers"
+        lb_connect_multi_match = re.search(
+            r'(?:a|an|the)?\s*([a-zA-Z0-9\s_-]+?)\s+(?:connected to|connects to|routes to|distributes to|balances to)\s+(two|three|four|five|2|3|4|5|\d+)\s+([a-zA-Z0-9\s_-]+)',
+            sentence,
+            re.IGNORECASE
+        )
+        if lb_connect_multi_match:
+            lb_name, count_str, comp_base = lb_connect_multi_match.groups()
+            count = int(count_str) if count_str.isdigit() else WORD_TO_NUM.get(count_str.lower(), 2)
+            comp_base_clean = re.sub(r'servers?', 'server', comp_base.strip(), flags=re.IGNORECASE).title()
+            lb_clean = lb_name.strip().title()
+            
+            lb_comp = register_comp(lb_clean, ctype="load_balancer", raw_mention=lb_name)
+            for i in range(1, count + 1):
+                cname = f"{comp_base_clean} {i}"
+                ctype = infer_component_type(comp_base_clean)
+                app_comp = register_comp(cname, ctype=ctype, raw_mention=f"{comp_base} {i}")
+                dependencies.append({
+                    "source_temp_id": lb_comp["temp_id"],
+                    "target_temp_id": app_comp["temp_id"],
+                    "source_name": lb_comp["name"],
+                    "target_name": app_comp["name"],
+                    "relationship_type": "routes_traffic_to",
+                    "source": "user_description",
+                    "explicit_quote": sentence,
+                    "metadata": {"discovered_by": "nlp_connected_multi_clause"}
+                })
+            continue
+
         # Pattern: "A load balancer routes to [X]"
         routes_to_match = re.search(
             r'(?:a|an|the)?\s*([a-zA-Z0-9\s_-]+?)\s+(?:routes(?: traffic)? to|distributes to|balances to)\s+(?:a|an|the)?\s*([a-zA-Z0-9\s_,-]+)',
@@ -147,28 +176,24 @@ def parse_with_rule_engine(description: str, domain: str = "general") -> Dict[st
             })
             continue
 
-        # Pattern: "Both connect to PostgreSQL" / "All connect to PostgreSQL" / "[X] connects to [Y]"
-        if re.search(r'\b(both|all|each|they)\s+connect\s+to\s+', sentence, re.IGNORECASE):
-            tgt_match = re.search(r'\b(?:both|all|each|they)\s+connect\s+to\s+(?:a|an|the)?\s*([a-zA-Z0-9\s_-]+)', sentence, re.IGNORECASE)
-            if tgt_match:
-                tgt_raw = tgt_match.group(1).strip()
-                tgt_comp = register_comp(tgt_raw.title(), raw_mention=tgt_raw)
-                
-                # Connect all previously found application servers/servers to this target
-                candidate_sources = [c for c in components if c["temp_id"] != tgt_comp["temp_id"] and c["type"] in ["application", "server"]]
-                for src in candidate_sources:
-                    # Check if already added
-                    if not any(d["source_temp_id"] == src["temp_id"] and d["target_temp_id"] == tgt_comp["temp_id"] for d in dependencies):
-                        dependencies.append({
-                            "source_temp_id": src["temp_id"],
-                            "target_temp_id": tgt_comp["temp_id"],
-                            "source_name": src["name"],
-                            "target_name": tgt_comp["name"],
-                            "relationship_type": "database_connection" if tgt_comp["type"] == "database" else "connects_to",
-                            "source": "user_description",
-                            "explicit_quote": sentence,
-                            "metadata": {}
-                        })
+        # Pattern: "Both connect to PostgreSQL" / "Both application servers connect to PostgreSQL" / "All servers connect to PostgreSQL"
+        both_connect_match = re.search(r'\b(both|all|each|they)(?:\s+[a-zA-Z0-9\s_-]+?)?\s+(?:connect|connects)\s+to\s+(?:a|an|the)?\s*([a-zA-Z0-9\s_-]+)', sentence, re.IGNORECASE)
+        if both_connect_match:
+            tgt_raw = both_connect_match.group(2).strip()
+            tgt_comp = register_comp(tgt_raw.title(), raw_mention=tgt_raw)
+            candidate_sources = [c for c in components if c["temp_id"] != tgt_comp["temp_id"] and c["type"] in ["application", "server"]]
+            for src in candidate_sources:
+                if not any(d["source_temp_id"] == src["temp_id"] and d["target_temp_id"] == tgt_comp["temp_id"] for d in dependencies):
+                    dependencies.append({
+                        "source_temp_id": src["temp_id"],
+                        "target_temp_id": tgt_comp["temp_id"],
+                        "source_name": src["name"],
+                        "target_name": tgt_comp["name"],
+                        "relationship_type": "database_connection" if tgt_comp["type"] == "database" else "connects_to",
+                        "source": "user_description",
+                        "explicit_quote": sentence,
+                        "metadata": {}
+                    })
             continue
 
         # Direct connection: "[X] connects to [Y]" / "[X] talks to [Y]" / "[X] depends on [Y]"

@@ -1,6 +1,6 @@
 {
   "model_type": "RandomForestClassifier",
-  "trained_at": "2026-09-04T17:57:13.148140+00:00",
+  "trained_at": "2026-09-05T04:38:25.633778+00:00",
   "n_samples_total": 280,
   "n_samples_train": 195,
   "n_samples_val": 43,

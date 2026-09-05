@@ -1,11 +1,21 @@
 # pyrefly: ignore [missing-import]
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any, Union
 from pydantic import ValidationError
 import os
 import logging
 from datetime import datetime, timezone
+
+# Load environment variables from .env if present
+try:
+    from dotenv import load_dotenv
+    _backend_dir = os.path.dirname(os.path.abspath(__file__))
+    load_dotenv(os.path.join(_backend_dir, ".env"))
+    load_dotenv(os.path.join(os.path.dirname(_backend_dir), ".env"))
+except ImportError:
+    pass
 
 from database import engine, Base, get_db
 import models, schemas, seed, simulation, aws_collector, metrics_collector, feasibility_engine, what_if_engine, sandbox_engine
@@ -22,6 +32,8 @@ logger = logging.getLogger("infratwin.api")
 
 import database
 database.init_db()
+
+DEFAULT_AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "ap-south-1"
 
 import time
 from contextlib import asynccontextmanager
@@ -45,6 +57,14 @@ async def lifespan(app: FastAPI):
         db.add(state)
         db.commit()
 
+    # Always clean any stale sandbox rows from previous runs so sandbox never appears on startup
+    try:
+        db.query(models.Dependency).filter(models.Dependency.source_environment == "sandbox").delete(synchronize_session=False)
+        db.query(models.Component).filter(models.Component.source_environment == "sandbox").delete(synchronize_session=False)
+        db.commit()
+    except Exception as e:
+        logger.warning("Could not clean stale sandbox rows on startup: %s", e)
+
     if data_source == "demo":
         logger.info("Explicit demo mode requested via environment. Populating synthetic AWS environment...")
         aws_collector.sync_aws_to_db(db, mode="replace", use_synthetic=True)
@@ -52,18 +72,21 @@ async def lifespan(app: FastAPI):
     elif data_source == "aws":
         auth_status = aws_collector.check_aws_credentials()
         if auth_status["authenticated"]:
-            logger.info("Syncing live AWS infrastructure on startup...")
-            res = aws_collector.sync_aws_to_db(db, mode="replace")
-            app.state.last_aws_sync = datetime.now(timezone.utc).isoformat()
-            logger.info("AWS startup sync: %s", res.get("message"))
-        else:
-            logger.info("AWS credentials not configured. Starting in clean unconnected state.")
-            state.mode = "unconnected"
-            state.discovery_status = "idle"
+            logger.info("AWS credentials authenticated on startup. Awaiting user discovery.")
+            state.account_id = auth_status.get("account_id")
+            state.arn = auth_status.get("arn")
+            state.region = auth_status.get("region", "ap-south-1")
+            state.discovery_status = "idle"  # Awaiting explicit user click to discover
             db.commit()
+        else:
+            logger.info("AWS credentials not configured on startup.")
+            if not (state.mode == "live" and state.account_id):
+                state.mode = "unconnected"
+                state.discovery_status = "idle"
+                db.commit()
     else:
         # Default: clean unconnected onboarding state (NO predefined fake nodes or automatic seeding)
-        logger.info("Starting InfraTwin in clean UNCONNECTED state. Awaiting user AWS connection.")
+        logger.info("Starting InfraTwin in clean UNCONNECTED state. Awaiting user action.")
         if state.mode == "unconnected":
             # If unconnected, ensure DB has 0 components
             if db.query(models.Component).count() > 0:
@@ -76,13 +99,37 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="InfraTwin API - IT Infrastructure Digital Twin", lifespan=lifespan)
 
+# Allow local development frontend origins with credentials
+DEV_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=DEV_ORIGINS,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled server exception: %s", exc)
+    response = JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal Server Error: {str(exc)}", "error_type": type(exc).__name__}
+    )
+    origin = request.headers.get("origin")
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
 
 @app.get("/api/health", response_model=schemas.HealthResponse)
 def get_health(db: Session = Depends(get_db)):
@@ -114,11 +161,28 @@ def get_twin_state(db: Session = Depends(get_db)):
     mode = state.mode if state else "unconnected"
 
     if mode == "manual":
-        total_comps = db.query(models.Component).filter_by(discovery_source="manual").count()
-        total_deps = db.query(models.Dependency).filter_by(source="manual").count()
+        total_comps = db.query(models.Component).filter(
+            (models.Component.source_environment == "manual") |
+            (models.Component.discovery_source.in_(["manual", "user_description"]))
+        ).count()
+        total_deps = db.query(models.Dependency).filter(
+            (models.Dependency.source_environment == "manual") |
+            (models.Dependency.source.in_(["manual", "user_description"])) |
+            (models.Dependency.discovery_source.in_(["manual", "user_description"]))
+        ).count()
     elif mode in ["live", "demo"]:
-        total_comps = db.query(models.Component).filter(models.Component.discovery_source.in_(["aws_api", "hybrid", "aws_synthetic", "proposed"])).count()
-        total_deps = db.query(models.Dependency).filter(models.Dependency.source.in_(["aws_api", "hybrid", "aws_synthetic", "proposed"])).count()
+        total_comps = db.query(models.Component).filter(
+            (models.Component.source_environment == "aws") |
+            (models.Component.discovery_source.in_(["aws", "aws_api", "hybrid", "aws_synthetic", "proposed"])) |
+            (models.Component.discovery_source.like("aws%"))
+        ).count()
+        total_deps = db.query(models.Dependency).filter(
+            (models.Dependency.source_environment == "aws") |
+            (models.Dependency.source.in_(["aws", "aws_api", "hybrid", "aws_synthetic", "proposed"])) |
+            (models.Dependency.discovery_source.in_(["aws", "aws_api", "hybrid", "aws_synthetic", "proposed"])) |
+            (models.Dependency.source.like("aws%")) |
+            (models.Dependency.discovery_source.like("aws%"))
+        ).count()
     else:
         total_comps = 0
         total_deps = 0
@@ -129,7 +193,7 @@ def get_twin_state(db: Session = Depends(get_db)):
             "authenticated": auth_info["authenticated"] if mode == "live" else False,
             "account_id": auth_info.get("account_id") if mode == "live" else None,
             "arn": auth_info.get("arn") if mode == "live" else None,
-            "region": auth_info.get("region", "us-east-1") if mode == "live" else "us-east-1",
+            "region": auth_info.get("region") or DEFAULT_AWS_REGION,
             "discovery_status": "completed" if total_comps > 0 else "idle",
             "discovery_summary": {},
             "last_sync": getattr(app.state, "last_aws_sync", None) if mode == "live" else None,
@@ -138,12 +202,13 @@ def get_twin_state(db: Session = Depends(get_db)):
             "total_dependencies": total_deps
         }
 
+    is_auth = (auth_info["authenticated"] or (mode == "live" and bool(state.account_id))) if mode == "live" else False
     return {
         "mode": state.mode,
-        "authenticated": auth_info["authenticated"] if mode == "live" else False,
+        "authenticated": is_auth,
         "account_id": (state.account_id or auth_info.get("account_id")) if mode == "live" else None,
         "arn": (state.arn or auth_info.get("arn")) if mode == "live" else None,
-        "region": (state.region or auth_info.get("region", "us-east-1")) if mode == "live" else "us-east-1",
+        "region": state.region or auth_info.get("region") or DEFAULT_AWS_REGION,
         "discovery_status": state.discovery_status,
         "discovery_summary": state.discovery_summary or {},
         "last_sync": (state.last_sync or getattr(app.state, "last_aws_sync", None)) if mode == "live" else None,
@@ -164,7 +229,7 @@ def connect_aws(request: schemas.AWSConnectRequest, db: Session = Depends(get_db
         access_key_id=request.access_key_id,
         secret_access_key=request.secret_access_key,
         session_token=request.session_token,
-        region=request.region
+        region=request.region or DEFAULT_AWS_REGION
     )
     if res["authenticated"]:
         # Update persistent TwinState: LIVE mode, awaiting explicit discovery
@@ -175,7 +240,7 @@ def connect_aws(request: schemas.AWSConnectRequest, db: Session = Depends(get_db
         state.mode = "live"
         state.account_id = res.get("account_id")
         state.arn = res.get("arn")
-        state.region = res.get("region", "us-east-1")
+        state.region = res.get("region") or DEFAULT_AWS_REGION
         state.discovery_status = "idle" # Awaiting explicit discovery click
         state.discovery_summary = {}
         state.last_sync = None
@@ -192,7 +257,7 @@ def connect_aws(request: schemas.AWSConnectRequest, db: Session = Depends(get_db
             "authenticated": True,
             "account_id": res.get("account_id"),
             "arn": res.get("arn"),
-            "region": res.get("region", "us-east-1"),
+            "region": res.get("region") or DEFAULT_AWS_REGION,
             "message": f"Successfully authenticated as AWS Account {res.get('account_id')} ({res.get('arn')}). Ready for infrastructure discovery.",
             "error": None
         }
@@ -201,7 +266,7 @@ def connect_aws(request: schemas.AWSConnectRequest, db: Session = Depends(get_db
             "authenticated": False,
             "account_id": None,
             "arn": None,
-            "region": request.region or "us-east-1",
+            "region": request.region or DEFAULT_AWS_REGION,
             "message": "AWS Authentication failed. Please check credentials and permissions.",
             "error": res.get("error")
         }
@@ -221,7 +286,7 @@ def reset_twin_environment(db: Session = Depends(get_db)):
     state.mode = "unconnected"
     state.account_id = None
     state.arn = None
-    state.region = "us-east-1"
+    state.region = DEFAULT_AWS_REGION
     state.discovery_status = "idle"
     state.discovery_summary = {}
     state.last_sync = None
@@ -294,14 +359,35 @@ def activate_manual_mode(db: Session = Depends(get_db)):
 
 @app.post("/api/aws/activate")
 def activate_aws_mode(db: Session = Depends(get_db)):
-    """Switch active view back to AWS Environment."""
+    """Switch active view back to AWS Environment and check credentials."""
     state = db.query(models.TwinState).filter_by(id=1).first()
     if not state:
         state = models.TwinState(id=1)
         db.add(state)
     state.mode = "live"
+    
+    # Validate/refresh STS credentials if available
+    auth = aws_collector.check_aws_credentials()
+    if auth.get("authenticated"):
+        state.account_id = auth.get("account_id")
+        state.arn = auth.get("arn")
+        state.region = auth.get("region") or DEFAULT_AWS_REGION
     db.commit()
-    return {"success": True, "mode": "live"}
+
+    total_aws_comps = db.query(models.Component).filter(
+        (models.Component.source_environment == "aws") |
+        (models.Component.discovery_source.in_(["aws", "aws_api", "hybrid", "aws_synthetic", "proposed"]))
+    ).count()
+
+    return {
+        "success": True,
+        "mode": "live",
+        "authenticated": bool(auth.get("authenticated")),
+        "account_id": state.account_id,
+        "region": state.region,
+        "arn": state.arn,
+        "components_count": total_aws_comps
+    }
 
 @app.post("/api/manual/components", response_model=schemas.Component)
 def create_manual_component(request: schemas.ManualComponentCreate, db: Session = Depends(get_db)):
@@ -780,14 +866,7 @@ def get_components(source_environment: Optional[str] = None, db: Session = Depen
                 (models.Component.source_environment.in_(["manual_waters", "demo", "aws"])) |
                 (models.Component.discovery_source.in_(["aws_api", "hybrid", "aws_synthetic", "proposed"]))
             ).all()
-            if not comps and db.query(models.Component).filter(models.Component.source_environment == "manual_waters").count() == 0:
-                seed.seed_data(db)
-                comps = db.query(models.Component).filter(
-                    models.Component.source_environment.in_(["manual_waters", "demo"])
-                ).all()
         else:
-            if db.query(models.Component).filter(models.Component.source_environment == "manual_waters").count() == 0:
-                seed.seed_data(db)
             comps = db.query(models.Component).all()
 
     for c in comps:
@@ -832,7 +911,9 @@ def get_dependencies(source_environment: Optional[str] = None, db: Session = Dep
         elif source_environment == "aws":
             return db.query(models.Dependency).filter(
                 (models.Dependency.source_environment == "aws") |
-                (models.Dependency.discovery_source.in_(["aws_api", "hybrid", "aws_synthetic"]))
+                (models.Dependency.discovery_source.in_(["aws_api", "hybrid", "aws_synthetic"])) |
+                (models.Dependency.discovery_source.like("aws%")) |
+                (models.Dependency.source.like("aws%"))
             ).all()
         else:
             return db.query(models.Dependency).filter(
@@ -852,7 +933,9 @@ def get_dependencies(source_environment: Optional[str] = None, db: Session = Dep
     elif mode == "live":
         return db.query(models.Dependency).filter(
             (models.Dependency.source_environment == "aws") |
-            (models.Dependency.discovery_source.in_(["aws_api", "hybrid"]))
+            (models.Dependency.discovery_source.in_(["aws_api", "hybrid"])) |
+            (models.Dependency.discovery_source.like("aws%")) |
+            (models.Dependency.source.like("aws%"))
         ).all()
     elif mode == "demo":
         return db.query(models.Dependency).filter(
@@ -974,8 +1057,9 @@ def get_aws_status(db: Session = Depends(get_db)):
     mode = state.mode if state else "unconnected"
     aws_comps = db.query(models.Component).filter(models.Component.arn.isnot(None)).count()
     total_comps = db.query(models.Component).count()
+    is_auth = auth_info["authenticated"] or (mode == "live" and bool(state and state.account_id))
     return {
-        "authenticated": auth_info["authenticated"],
+        "authenticated": is_auth,
         "account_id": state.account_id if (state and state.account_id) else auth_info.get("account_id"),
         "arn": state.arn if (state and state.arn) else auth_info.get("arn"),
         "region": state.region if (state and state.region) else auth_info.get("region", "us-east-1"),
@@ -983,7 +1067,7 @@ def get_aws_status(db: Session = Depends(get_db)):
         "last_sync": state.last_sync if (state and state.last_sync) else getattr(app.state, "last_aws_sync", None),
         "aws_components_count": aws_comps,
         "total_components_count": total_comps,
-        "error": auth_info.get("error")
+        "error": None if is_auth else auth_info.get("error")
     }
 
 @app.get("/api/aws/cost", response_model=schemas.AWSCostReport)
@@ -1013,15 +1097,33 @@ def sync_aws(request: schemas.AWSSyncRequest = schemas.AWSSyncRequest(), db: Ses
     Supports mode='merge' (preserves on-prem data) or mode='replace'.
     Supports use_synthetic=True for offline testing when credentials are not available.
     """
-    result = aws_collector.sync_aws_to_db(
-        db=db,
-        mode=request.mode,
-        use_synthetic=request.use_synthetic,
-        region=request.region
-    )
-    if result.get("success"):
-        app.state.last_aws_sync = datetime.now(timezone.utc).isoformat()
-    return result
+    try:
+        result = aws_collector.sync_aws_to_db(
+            db=db,
+            mode=request.mode,
+            use_synthetic=request.use_synthetic,
+            region=request.region
+        )
+        if result.get("success"):
+            app.state.last_aws_sync = datetime.now(timezone.utc).isoformat()
+        return result
+    except Exception as e:
+        logger.exception("AWS infrastructure discovery failed: %s", str(e))
+        total_comps = db.query(models.Component).count()
+        total_deps = db.query(models.Dependency).count()
+        return {
+            "success": False,
+            "message": f"AWS discovery failed: {str(e)}",
+            "data_source": "none",
+            "account_id": None,
+            "region": request.region or DEFAULT_AWS_REGION,
+            "components_added": 0,
+            "components_updated": 0,
+            "dependencies_added": 0,
+            "total_components": total_comps,
+            "total_dependencies": total_deps,
+            "summary": {}
+        }
 
 def run_simulation_common(request: schemas.SimulationRequest, db: Session):
     target_id = request.get_component_id()
@@ -1333,6 +1435,31 @@ def what_if_candidates(
         return result
     except Exception as e:
         logger.error("What-if candidates error: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/twin/what-if/agents/evaluate", response_model=schemas.MultiAgentDecision)
+def evaluate_what_if_agents(
+    request: schemas.WhatIfRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Evaluates generated candidates using the Three-Agent (Financial, Risk, System Architect)
+    decision layer and derives agent consensus or explicit conflict tradeoffs.
+    """
+    try:
+        result = what_if_engine.generate_what_if_candidates(
+            db=db,
+            target_component_id=request.target_component_id,
+            action=request.action,
+            source_environment=request.source_environment,
+        )
+        if not result.get("agents"):
+            raise HTTPException(status_code=400, detail="Could not evaluate agents for the provided scenario.")
+        return result["agents"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Three-agent evaluation error: %s", str(e))
         raise HTTPException(status_code=400, detail=str(e))
 
 

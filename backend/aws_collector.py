@@ -6,6 +6,15 @@ from typing import List, Dict, Tuple, Any, Optional, Set
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError, PartialCredentialsError
 
+# Load environment variables from .env if present
+try:
+    from dotenv import load_dotenv
+    _backend_dir = os.path.dirname(os.path.abspath(__file__))
+    load_dotenv(os.path.join(_backend_dir, ".env"))
+    load_dotenv(os.path.join(os.path.dirname(_backend_dir), ".env"))
+except ImportError:
+    pass
+
 import models
 from models import ComponentType, Environment, Criticality, Status, DependencyType
 from graph_builder import AWSDependencyGraphBuilder
@@ -35,6 +44,56 @@ INSTANCE_COST_TABLE: Dict[str, float] = {
 
 _ACTIVE_AWS_SESSION: Optional[boto3.Session] = None
 
+def save_credentials_to_env(
+    access_key_id: str,
+    secret_access_key: str,
+    session_token: Optional[str] = None,
+    region: Optional[str] = "us-east-1"
+):
+    """Persists authenticated credentials into backend/.env for permanence across restarts."""
+    if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("ENV") == "test":
+        return
+    try:
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        env_path = os.path.join(backend_dir, ".env")
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+        keys_to_set = {
+            "AWS_ACCESS_KEY_ID": access_key_id.strip(),
+            "AWS_SECRET_ACCESS_KEY": secret_access_key.strip(),
+            "AWS_SESSION_TOKEN": (session_token or "").strip(),
+            "AWS_DEFAULT_REGION": region or "us-east-1",
+            "AWS_REGION": region or "us-east-1",
+            "INFRATWIN_DATA_SOURCE": "aws",
+        }
+
+        updated_keys = set()
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            matched = False
+            for k, v in keys_to_set.items():
+                if stripped.startswith(f"{k}=") or stripped == k:
+                    new_lines.append(f"{k}={v}\n")
+                    updated_keys.add(k)
+                    matched = True
+                    break
+            if not matched:
+                new_lines.append(line)
+
+        for k, v in keys_to_set.items():
+            if k not in updated_keys and v:
+                new_lines.append(f"{k}={v}\n")
+
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        logger.info("Saved active AWS credentials into %s", env_path)
+    except Exception as e:
+        logger.warning("Could not persist credentials to .env: %s", str(e))
+
 def set_active_aws_credentials(
     access_key_id: str,
     secret_access_key: str,
@@ -43,21 +102,31 @@ def set_active_aws_credentials(
 ) -> Dict[str, Any]:
     """
     Validates provided AWS credentials against STS GetCallerIdentity and sets the active session.
+    Also persists to backend/.env and updates runtime environment variables.
     """
     global _ACTIVE_AWS_SESSION
     reg = region or "us-east-1"
     session_kwargs = {
-        "aws_access_key_id": access_key_id,
-        "aws_secret_access_key": secret_access_key,
+        "aws_access_key_id": access_key_id.strip(),
+        "aws_secret_access_key": secret_access_key.strip(),
         "region_name": reg
     }
-    if session_token:
-        session_kwargs["aws_session_token"] = session_token
+    if session_token and session_token.strip():
+        session_kwargs["aws_session_token"] = session_token.strip()
     
     test_session = boto3.Session(**session_kwargs)
     status = check_aws_credentials(test_session)
     if status["authenticated"]:
         _ACTIVE_AWS_SESSION = test_session
+        os.environ["AWS_ACCESS_KEY_ID"] = access_key_id.strip()
+        os.environ["AWS_SECRET_ACCESS_KEY"] = secret_access_key.strip()
+        if session_token and session_token.strip():
+            os.environ["AWS_SESSION_TOKEN"] = session_token.strip()
+        elif "AWS_SESSION_TOKEN" in os.environ:
+            del os.environ["AWS_SESSION_TOKEN"]
+        os.environ["AWS_DEFAULT_REGION"] = reg
+        os.environ["AWS_REGION"] = reg
+        save_credentials_to_env(access_key_id, secret_access_key, session_token, reg)
         logger.info("Activated live AWS session for account %s (%s)", status.get("account_id"), reg)
         return status
     else:
@@ -77,6 +146,14 @@ def get_boto3_session(region_name: Optional[str] = None) -> boto3.Session:
     4. IAM Instance profile / Container credentials / SSO
     """
     global _ACTIVE_AWS_SESSION
+    # Dynamically re-read .env if present so file edits take effect immediately
+    try:
+        from dotenv import load_dotenv
+        _bdir = os.path.dirname(os.path.abspath(__file__))
+        load_dotenv(os.path.join(_bdir, ".env"), override=True)
+    except Exception:
+        pass
+
     if _ACTIVE_AWS_SESSION is not None:
         if region_name and _ACTIVE_AWS_SESSION.region_name != region_name:
             creds = _ACTIVE_AWS_SESSION.get_credentials()
@@ -94,6 +171,20 @@ def get_boto3_session(region_name: Optional[str] = None) -> boto3.Session:
         or os.environ.get("AWS_DEFAULT_REGION")
         or "us-east-1"
     )
+
+    ak = os.environ.get("AWS_ACCESS_KEY_ID", "").strip()
+    sk = os.environ.get("AWS_SECRET_ACCESS_KEY", "").strip()
+    st = os.environ.get("AWS_SESSION_TOKEN", "").strip()
+    if ak and sk:
+        kwargs = {
+            "aws_access_key_id": ak,
+            "aws_secret_access_key": sk,
+            "region_name": region
+        }
+        if st:
+            kwargs["aws_session_token"] = st
+        return boto3.Session(**kwargs)
+
     return boto3.Session(region_name=region)
 
 def check_aws_credentials(session: Optional[boto3.Session] = None) -> Dict[str, Any]:
@@ -628,6 +719,59 @@ class AWSInfrastructureCollector:
                         buckets.append(bname)
         return buckets
 
+    def collect_all(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        Executes full resource collection and derives the deterministic dependency graph.
+        """
+        all_components: List[Dict[str, Any]] = []
+
+        logger.info("Starting AWS resource collection in region: %s", self.region)
+        vpcs = self.collect_vpcs()
+        all_components.extend(vpcs)
+
+        subnets = self.collect_subnets()
+        all_components.extend(subnets)
+
+        sgs, sg_rules = self.collect_security_groups()
+        all_components.extend(sgs)
+
+        instances, profile_names = self.collect_ec2_instances()
+        all_components.extend(instances)
+
+        dbs = self.collect_rds_instances()
+        all_components.extend(dbs)
+
+        albs, target_health = self.collect_load_balancers()
+        all_components.extend(albs)
+
+        s3s = self.collect_s3_buckets()
+        all_components.extend(s3s)
+
+        iam_profiles = self.collect_iam_instance_profiles(profile_names)
+
+        # Build actual infrastructure dependency graph
+        builder = AWSDependencyGraphBuilder(all_components)
+        all_dependencies = builder.build_all(
+            target_health_records=target_health,
+            security_group_rules=sg_rules,
+            iam_instance_profiles=iam_profiles
+        )
+
+        summary = {
+            "vpcs": len(vpcs),
+            "subnets": len(subnets),
+            "security_groups": len(sgs),
+            "ec2_instances": len(instances),
+            "rds_databases": len(dbs),
+            "load_balancers": len(albs),
+            "s3_buckets": len(s3s),
+            "total_components": len(all_components),
+            "total_dependencies": len(all_dependencies)
+        }
+        logger.info("Collection complete. Discovered %d components, %d dependencies.", len(all_components), len(all_dependencies))
+        return all_components, all_dependencies, summary
+
+
 def collect_health_events(session: Optional[boto3.Session] = None) -> Dict[str, Any]:
     """
     Discovers active/upcoming AWS Health events and affected infrastructure entities.
@@ -742,58 +886,6 @@ def collect_health_events(session: Optional[boto3.Session] = None) -> Dict[str, 
             "support_plan_required": False,
             "error": str(e)
         }
-
-    def collect_all(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
-        """
-        Executes full resource collection and derives the deterministic dependency graph.
-        """
-        all_components: List[Dict[str, Any]] = []
-
-        logger.info("Starting AWS resource collection in region: %s", self.region)
-        vpcs = self.collect_vpcs()
-        all_components.extend(vpcs)
-
-        subnets = self.collect_subnets()
-        all_components.extend(subnets)
-
-        sgs, sg_rules = self.collect_security_groups()
-        all_components.extend(sgs)
-
-        instances, profile_names = self.collect_ec2_instances()
-        all_components.extend(instances)
-
-        dbs = self.collect_rds_instances()
-        all_components.extend(dbs)
-
-        albs, target_health = self.collect_load_balancers()
-        all_components.extend(albs)
-
-        s3s = self.collect_s3_buckets()
-        all_components.extend(s3s)
-
-        iam_profiles = self.collect_iam_instance_profiles(profile_names)
-
-        # Build actual infrastructure dependency graph
-        builder = AWSDependencyGraphBuilder(all_components)
-        all_dependencies = builder.build_all(
-            target_health_records=target_health,
-            security_group_rules=sg_rules,
-            iam_instance_profiles=iam_profiles
-        )
-
-        summary = {
-            "vpcs": len(vpcs),
-            "subnets": len(subnets),
-            "security_groups": len(sgs),
-            "ec2_instances": len(instances),
-            "rds_databases": len(dbs),
-            "load_balancers": len(albs),
-            "s3_buckets": len(s3s),
-            "total_components": len(all_components),
-            "total_dependencies": len(all_dependencies)
-        }
-        logger.info("Collection complete. Discovered %d components, %d dependencies.", len(all_components), len(all_dependencies))
-        return all_components, all_dependencies, summary
 
 
 def generate_synthetic_aws_data(region: str = "us-east-1") -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
@@ -1091,7 +1183,7 @@ def sync_aws_to_db(
     session = get_boto3_session(region)
     auth_status = check_aws_credentials(session)
 
-    if auth_status["authenticated"]:
+    if auth_status["authenticated"] and not use_synthetic:
         collector = AWSInfrastructureCollector(session, region)
         raw_components, raw_dependencies, summary = collector.collect_all()
         data_source = "aws_api"
@@ -1180,6 +1272,7 @@ def sync_aws_to_db(
                 criticality=dep_data.get("criticality", models.Criticality.medium),
                 source=dep_data.get("source", dep_data.get("discovery_source", data_source)),
                 discovery_source=dep_data.get("source", dep_data.get("discovery_source", data_source)),
+                source_environment="aws",
                 metadata_col=dep_data.get("metadata", dep_data.get("metadata_col", {}))
             )
             db.add(dep)

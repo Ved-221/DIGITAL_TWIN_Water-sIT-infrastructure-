@@ -30,10 +30,18 @@ export interface CandidateSimulationResult {
 
 export interface WhatIfCandidate {
   candidate_id: string;
+  id?: string;
+  solution_id?: string;
   name: string;
   description: string;
   strategy_type: string;
   proposed_changes: string[];
+  components_to_add?: Array<Record<string, any>>;
+  components_to_modify?: Array<Record<string, any>>;
+  components_to_remove?: Array<Record<string, any>>;
+  dependencies_to_add?: Array<Record<string, any>>;
+  dependencies_to_modify?: Array<Record<string, any>>;
+  dependencies_to_remove?: Array<Record<string, any>>;
   resulting_topology?: Record<string, any> | null;
   affected_components: Array<Record<string, any>>;
   simulation_result: CandidateSimulationResult;
@@ -99,6 +107,8 @@ export interface CandidateFeatureSet {
 export interface MLRankingItem {
   candidate_id: string;
   rank: number;
+  score?: number | null;
+  confidence?: number | null;
   recommendation: boolean;
   ranking_method: string;
   features_used: string[];
@@ -129,6 +139,10 @@ export interface AgentReport {
 export interface AgentConflict {
   dimension?: string;
   description?: string;
+  financial_view?: string;
+  risk_view?: string;
+  architect_view?: string;
+  tradeoff_summary?: string;
   agents_involved?: string[];
   details?: Record<string, any>;
 }

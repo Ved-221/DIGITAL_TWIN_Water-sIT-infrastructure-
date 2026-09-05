@@ -84,6 +84,7 @@ def simulate_candidate_on_graph(
     base_result: Dict[str, Any],
     available_metrics: List[str],
     missing_data: List[str],
+    strategy_type: str = "direct_lift_shift",
 ) -> Dict[str, Any]:
     """
     Pure in-memory simulation on an already-mutated graph copy.
@@ -96,9 +97,21 @@ def simulate_candidate_on_graph(
     result = _empty_candidate_simulation()
 
     if target_id not in G_candidate:
-        result["risk_level"] = "unknown"
-        result["critical_flags"].append(f"Target '{target_id}' not present in candidate graph.")
-        return result
+        if strategy_type in ["remove", "decommission"]:
+            base_cost = float(component.cost_per_month or 0.0) if hasattr(component, "cost_per_month") else 0.0
+            result["blast_radius"] = 0
+            result["upstream_impact"] = []
+            result["downstream_deps"] = []
+            result["risk_score"] = 10.0
+            result["risk_level"] = "LOW"
+            result["estimated_downtime_minutes"] = 0
+            result["cost_delta_monthly"] = -round(base_cost, 2)
+            result["spof_eliminated"] = base_result.get("risk_factors", {}).get("is_single_point_of_failure", False)
+            return result
+        else:
+            result["risk_level"] = "unknown"
+            result["critical_flags"].append(f"Target '{target_id}' not present in candidate graph.")
+            return result
 
     target_node = G_candidate.nodes[target_id]
 
@@ -270,7 +283,7 @@ def _apply_candidate_mutation(
     target_id: str,
     strategy_type: str,
     component: models.Component,
-) -> Tuple[nx.DiGraph, List[str], float]:
+) -> Tuple[nx.DiGraph, List[str], float, Dict[str, List[Dict[str, Any]]]]:
     """
     Deep-copies G_original and applies the candidate's topology mutations.
 
@@ -278,16 +291,27 @@ def _apply_candidate_mutation(
         G_cand      — mutated graph (isolated from original)
         mutations   — human-readable description of changes
         extra_cost  — additional monthly cost added by this topology change
+        diff_dict   — structured graph transformation details (added, modified, removed nodes & edges)
     """
     G_cand = copy.deepcopy(G_original)
     mutations: List[str] = []
     extra_cost = 0.0
+    diff_dict: Dict[str, List[Dict[str, Any]]] = {
+        "components_to_add": [],
+        "components_to_modify": [],
+        "components_to_remove": [],
+        "dependencies_to_add": [],
+        "dependencies_to_modify": [],
+        "dependencies_to_remove": [],
+    }
 
     if target_id not in G_cand:
-        return G_cand, mutations, extra_cost
+        return G_cand, mutations, extra_cost, diff_dict
 
     target_meta = dict(G_cand.nodes[target_id].get("metadata_col", {}) or {})
     base_cost = float(G_cand.nodes[target_id].get("cost_per_month", 0.0) or 0.0)
+    comp_name = component.name if hasattr(component, "name") else G_cand.nodes[target_id].get("name", target_id)
+    comp_type = str(component.type if hasattr(component, "type") else G_cand.nodes[target_id].get("type", "server"))
 
     if strategy_type in ["multi_az_modernize", "multi_az_standby", "redundancy"]:
         alb_id = f"alb-{uuid.uuid4().hex[:6]}"
@@ -300,19 +324,27 @@ def _apply_candidate_mutation(
         G_cand.nodes[target_id]["metadata_col"] = target_meta
         G_cand.nodes[target_id]["criticality"] = "medium"
 
-        G_cand.add_node(alb_id, name=f"ALB-{component.name}", type="application",
+        G_cand.add_node(alb_id, name=f"ALB-{comp_name}", type="application",
                         criticality="high", status="active", cost_per_month=25.0,
                         metadata_col={})
-        G_cand.add_node(standby_id, name=f"{component.name}-Standby-AZ2",
-                        type=str(component.type), criticality="medium",
+        G_cand.add_node(standby_id, name=f"{comp_name}-Standby-AZ2",
+                        type=comp_type, criticality="medium",
                         status="active", cost_per_month=base_cost, metadata_col={})
         G_cand.add_edge(alb_id, target_id, relationship_type="routes_traffic")
         G_cand.add_edge(alb_id, standby_id, relationship_type="routes_traffic")
+
+        diff_dict["components_to_add"].append({"id": alb_id, "name": f"ALB-{comp_name}", "type": "application"})
+        diff_dict["components_to_add"].append({"id": standby_id, "name": f"{comp_name}-Standby-AZ2", "type": comp_type})
+        diff_dict["components_to_modify"].append({"id": target_id, "name": comp_name, "changes": {"multi_az": True, "criticality": "medium"}})
+        diff_dict["dependencies_to_add"].append({"source": alb_id, "target": target_id, "relationship_type": "routes_traffic"})
+        diff_dict["dependencies_to_add"].append({"source": alb_id, "target": standby_id, "relationship_type": "routes_traffic"})
 
         for p in list(G_cand.predecessors(target_id)):
             if p != alb_id:
                 G_cand.remove_edge(p, target_id)
                 G_cand.add_edge(p, alb_id, relationship_type="routes_traffic")
+                diff_dict["dependencies_to_remove"].append({"source": p, "target": target_id})
+                diff_dict["dependencies_to_add"].append({"source": p, "target": alb_id, "relationship_type": "routes_traffic"})
 
         mutations.append("Injected Application Load Balancer + Multi-AZ Standby replica")
 
@@ -322,10 +354,15 @@ def _apply_candidate_mutation(
         target_meta["read_replica_enabled"] = True
         target_meta["_extra_monthly_cost"] = extra_cost
         G_cand.nodes[target_id]["metadata_col"] = target_meta
-        G_cand.add_node(replica_id, name=f"{component.name}-ReadReplica",
+        G_cand.add_node(replica_id, name=f"{comp_name}-ReadReplica",
                         type="database", criticality="medium", status="active",
                         cost_per_month=extra_cost, metadata_col={})
         G_cand.add_edge(replica_id, target_id, relationship_type="replicates_from")
+
+        diff_dict["components_to_add"].append({"id": replica_id, "name": f"{comp_name}-ReadReplica", "type": "database"})
+        diff_dict["components_to_modify"].append({"id": target_id, "name": comp_name, "changes": {"read_replica_enabled": True}})
+        diff_dict["dependencies_to_add"].append({"source": replica_id, "target": target_id, "relationship_type": "replicates_from"})
+
         mutations.append("Provisioned Dedicated Read Replica")
 
     elif strategy_type in ["dependency_circuit_breaker", "dependency_decoupling"]:
@@ -333,14 +370,21 @@ def _apply_candidate_mutation(
         extra_cost = 15.0
         target_meta["_extra_monthly_cost"] = extra_cost
         G_cand.nodes[target_id]["metadata_col"] = target_meta
-        G_cand.add_node(queue_id, name=f"Queue-Buffer-{component.name}",
+        G_cand.add_node(queue_id, name=f"Queue-Buffer-{comp_name}",
                         type="application", criticality="medium", status="active",
                         cost_per_month=15.0, metadata_col={})
         G_cand.add_edge(queue_id, target_id, relationship_type="buffers_to")
+
+        diff_dict["components_to_add"].append({"id": queue_id, "name": f"Queue-Buffer-{comp_name}", "type": "application"})
+        diff_dict["components_to_modify"].append({"id": target_id, "name": comp_name, "changes": {"circuit_breaker_enabled": True}})
+        diff_dict["dependencies_to_add"].append({"source": queue_id, "target": target_id, "relationship_type": "buffers_to"})
+
         for p in list(G_cand.predecessors(target_id)):
             if p != queue_id:
                 G_cand.remove_edge(p, target_id)
                 G_cand.add_edge(p, queue_id, relationship_type="buffers_to")
+                diff_dict["dependencies_to_remove"].append({"source": p, "target": target_id})
+                diff_dict["dependencies_to_add"].append({"source": p, "target": queue_id, "relationship_type": "buffers_to"})
         mutations.append("Injected Asynchronous Message Buffer + Circuit Breaker")
 
     elif strategy_type in ["phased_blue_green", "staged_migration"]:
@@ -350,25 +394,60 @@ def _apply_candidate_mutation(
         target_meta["estimated_downtime_minutes"] = 0
         target_meta["_extra_monthly_cost"] = extra_cost
         G_cand.nodes[target_id]["metadata_col"] = target_meta
-        G_cand.add_node(shadow_id, name=f"{component.name}-Shadow-Target",
-                        type=str(component.type), criticality=str(component.criticality),
+        G_cand.add_node(shadow_id, name=f"{comp_name}-Shadow-Target",
+                        type=comp_type, criticality=str(component.criticality if hasattr(component, "criticality") else "medium"),
                         status="active", cost_per_month=base_cost, metadata_col={})
         G_cand.add_edge(shadow_id, target_id, relationship_type="syncs_with")
+
+        diff_dict["components_to_add"].append({"id": shadow_id, "name": f"{comp_name}-Shadow-Target", "type": comp_type})
+        diff_dict["components_to_modify"].append({"id": target_id, "name": comp_name, "changes": {"staged_cutover": True, "estimated_downtime_minutes": 0}})
+        diff_dict["dependencies_to_add"].append({"source": shadow_id, "target": target_id, "relationship_type": "syncs_with"})
+
         mutations.append("Provisioned Shadow Target with Live Traffic Sync")
 
     elif strategy_type in ["scale_up", "scale_out", "scale"]:
         extra_cost = round(base_cost * 0.50, 2)
         target_meta["_extra_monthly_cost"] = extra_cost
+        target_meta["scaled_capacity"] = True
         G_cand.nodes[target_id]["metadata_col"] = target_meta
-        G_cand.nodes[target_id]["cpu"] = (float(G_cand.nodes[target_id].get("cpu") or 2)) * 2
-        G_cand.nodes[target_id]["memory"] = (float(G_cand.nodes[target_id].get("memory") or 4)) * 2
+        orig_cpu = float(G_cand.nodes[target_id].get("cpu") or 2)
+        orig_mem = float(G_cand.nodes[target_id].get("memory") or 4)
+        G_cand.nodes[target_id]["cpu"] = orig_cpu * 2
+        G_cand.nodes[target_id]["memory"] = orig_mem * 2
+
+        diff_dict["components_to_modify"].append({
+            "id": target_id,
+            "name": comp_name,
+            "changes": {"cpu": f"{orig_cpu} -> {orig_cpu * 2}", "memory": f"{orig_mem} -> {orig_mem * 2}", "scaled_capacity": True}
+        })
         mutations.append("Doubled CPU and RAM compute capacity")
 
-    elif strategy_type == "direct_lift_shift":
-        # No topology change — runs the original graph as-is
+    elif strategy_type in ["remove", "decommission"]:
+        extra_cost = -base_cost
+        diff_dict["components_to_remove"].append({"id": target_id, "name": comp_name, "type": comp_type})
+        in_edges = list(G_cand.in_edges(target_id))
+        out_edges = list(G_cand.out_edges(target_id))
+        for u, v in in_edges:
+            diff_dict["dependencies_to_remove"].append({"source": u, "target": v})
+            G_cand.remove_edge(u, v)
+        for u, v in out_edges:
+            diff_dict["dependencies_to_remove"].append({"source": u, "target": v})
+            G_cand.remove_edge(u, v)
+        G_cand.remove_node(target_id)
+        mutations.append(f"Decommissioned component {comp_name} and severed connected dependency links")
+
+    elif strategy_type in ["fail", "degrade"]:
+        target_meta["injected_failure"] = True
+        G_cand.nodes[target_id]["status"] = "degraded"
+        G_cand.nodes[target_id]["metadata_col"] = target_meta
+        diff_dict["components_to_modify"].append({"id": target_id, "name": comp_name, "changes": {"status": "degraded"}})
+        mutations.append(f"Injected operational service outage on {comp_name}")
+
+    elif strategy_type in ["direct_lift_shift", "migration", "migrate"]:
+        diff_dict["components_to_modify"].append({"id": target_id, "name": comp_name, "changes": {"sequential_cutover": True}})
         mutations.append("No topology change; direct sequential execution")
 
-    return G_cand, mutations, extra_cost
+    return G_cand, mutations, extra_cost, diff_dict
 
 
 # ---------------------------------------------------------------------------
@@ -419,9 +498,11 @@ def _assess_feasibility(
     evidence: List[str] = []
     risk = sim_result.get("risk_score")
 
-    if missing_data:
-        unknown_fields = ", ".join(missing_data)
-        evidence.append(f"Missing data prevents full evaluation: {unknown_fields}.")
+    # Only critical missing structural data should block feasibility
+    critical_missing = [m for m in missing_data if m in ["target_component", "graph_topology", "component_record"]]
+    if critical_missing:
+        unknown_fields = ", ".join(critical_missing)
+        evidence.append(f"Missing critical data prevents full evaluation: {unknown_fields}.")
         return "unknown", evidence
 
     if risk is None:
@@ -442,6 +523,9 @@ def _assess_feasibility(
     if cost is not None:
         sign = "+" if cost >= 0 else ""
         evidence.append(f"Monthly cost delta: {sign}${cost:,.2f}.")
+
+    if "live_cpu_telemetry" in missing_data:
+        evidence.append("Telemetry note: live CPU telemetry not active; evaluated from static specs.")
 
     if risk >= 70:
         evidence.append(f"Risk score {risk} indicates CRITICAL exposure — remediation required before applying.")
@@ -479,36 +563,74 @@ def generate_what_if_candidates(
 
     The original DB is NEVER mutated.
     """
-    # --- Resolve source environment ---
-    if not source_environment:
-        comp = db.query(models.Component).filter(models.Component.id == target_component_id).first()
-        if comp and comp.source_environment:
-            source_environment = comp.source_environment
-        elif comp and comp.discovery_source:
-            source_environment = comp.discovery_source
+    # Check if target component exists in database
+    comp_record = db.query(models.Component).filter(models.Component.id == target_component_id).first()
+    if not comp_record:
+        return {
+            "success": False,
+            "error": "Target component not found in the active Twin.",
+            "target_component_id": target_component_id,
+            "action": action,
+            "source_environment": source_environment or "unknown",
+            "candidates": [],
+            "original_baseline": None,
+            "scenario": {
+                "target_component_id": target_component_id,
+                "action": action,
+                "source_environment": source_environment or "unknown",
+            },
+            "simulation_results": [],
+            "extracted_features": [],
+            "ml_ranking": [],
+            "ranking": [],
+            "recommended_candidate_id": None,
+            "recommendation": None,
+            "ranking_status": "insufficient_data",
+            "ranking_method": "none",
+            "evidence": ["Target component not found in the active Twin."],
+            "missing_data": ["target_component"],
+            "limitations": ["Target component not found in the active Twin."],
+        }
+
+    # Resolve active environment where component actually exists
+    comp_env = comp_record.source_environment or comp_record.discovery_source or "manual"
+    if comp_env in ["user_description", "manual"]:
+        comp_env = "manual"
+    elif comp_env in ["aws", "aws_api", "hybrid", "aws_synthetic"]:
+        comp_env = "aws"
+    elif comp_env == "sandbox" or target_component_id.startswith("sb-"):
+        comp_env = "sandbox"
+
+    # If source_environment was not provided or differs from where component exists, verify against active graph
+    if not source_environment or source_environment != comp_env:
+        G_check = build_graph(db, source_environment or comp_env)
+        if target_component_id in G_check:
+            effective_env = source_environment or comp_env
         else:
-            source_environment = "aws"
+            effective_env = comp_env
+    else:
+        effective_env = source_environment
 
     # Normalize: user_description components are stored under the 'manual' graph key
-    if source_environment == "user_description":
-        source_environment = "manual"
+    if effective_env == "user_description":
+        effective_env = "manual"
 
     # --- Step 1: Snapshot ---
-    G_original, comp_registry = snapshot_twin_graph(db, source_environment)
+    G_original, comp_registry = snapshot_twin_graph(db, effective_env)
 
     if target_component_id not in G_original:
         return {
             "success": False,
-            "error": f"Component '{target_component_id}' not found in environment '{source_environment}'.",
+            "error": "Target component not found in the active Twin.",
             "target_component_id": target_component_id,
             "action": action,
-            "source_environment": source_environment,
+            "source_environment": effective_env,
             "candidates": [],
             "original_baseline": None,
             "scenario": {
                 "target_component_id": target_component_id,
                 "action": action,
-                "source_environment": source_environment,
+                "source_environment": effective_env,
             },
             "simulation_results": [],
             "extracted_features": [],
@@ -518,38 +640,12 @@ def generate_what_if_candidates(
             "recommendation": None,
             "ranking_status": "insufficient_data",
             "ranking_method": "none",
-            "evidence": ["Target component not found in environment."],
+            "evidence": ["Target component not found in the active Twin."],
             "missing_data": ["target_component"],
-            "limitations": ["Component not found."],
+            "limitations": ["Target component not found in the active Twin."],
         }
 
-    component = comp_registry.get(target_component_id)
-    if not component:
-        return {
-            "success": False,
-            "error": f"Component record not found in DB for id '{target_component_id}'.",
-            "target_component_id": target_component_id,
-            "action": action,
-            "source_environment": source_environment,
-            "candidates": [],
-            "original_baseline": None,
-            "scenario": {
-                "target_component_id": target_component_id,
-                "action": action,
-                "source_environment": source_environment,
-            },
-            "simulation_results": [],
-            "extracted_features": [],
-            "ml_ranking": [],
-            "ranking": [],
-            "recommended_candidate_id": None,
-            "recommendation": None,
-            "ranking_status": "insufficient_data",
-            "ranking_method": "none",
-            "evidence": ["Component record not found in DB."],
-            "missing_data": ["target_component"],
-            "limitations": ["Component record not found in DB."],
-        }
+    component = comp_registry.get(target_component_id, comp_record)
 
     target_node = G_original.nodes[target_component_id]
 
@@ -590,7 +686,7 @@ def generate_what_if_candidates(
         "target_component_id": target_component_id,
         "target_component_name": target_node.get("name", target_component_id),
         "action": action,
-        "source_environment": source_environment,
+        "source_environment": effective_env,
         "blast_radius": len(all_affected_orig),
         "upstream_impact_count": len(upstream_nodes),
         "downstream_dependencies_count": len(downstream_nodes),
@@ -674,7 +770,7 @@ def generate_what_if_candidates(
             cand_available_metrics.append("cost_per_month")
 
         # Apply mutations to isolated copy
-        G_cand, mutations, extra_cost = _apply_candidate_mutation(
+        G_cand, mutations, extra_cost, diff_dict = _apply_candidate_mutation(
             G_original=G_original,
             target_id=target_component_id,
             strategy_type=strategy_type,
@@ -690,6 +786,7 @@ def generate_what_if_candidates(
             base_result=base_result_for_candidates,
             available_metrics=cand_available_metrics,
             missing_data=cand_missing_data,
+            strategy_type=strategy_type,
         )
 
         # Resulting topology from the candidate graph (not the original)
@@ -712,6 +809,12 @@ def generate_what_if_candidates(
             "description": raw.get("description", ""),
             "strategy_type": strategy_type,
             "proposed_changes": mutations,
+            "components_to_add": diff_dict.get("components_to_add", []),
+            "components_to_modify": diff_dict.get("components_to_modify", []),
+            "components_to_remove": diff_dict.get("components_to_remove", []),
+            "dependencies_to_add": diff_dict.get("dependencies_to_add", []),
+            "dependencies_to_modify": diff_dict.get("dependencies_to_modify", []),
+            "dependencies_to_remove": diff_dict.get("dependencies_to_remove", []),
             "resulting_topology": resulting_topology,
             "affected_components": affected_components,
             "simulation_result": {
@@ -771,7 +874,7 @@ def generate_what_if_candidates(
         "target_component_id": target_component_id,
         "target_component_name": target_node.get("name", target_component_id),
         "action": action,
-        "source_environment": source_environment,
+        "source_environment": effective_env,
         "baseline_blast_radius": original_baseline.get("blast_radius", 0),
         "baseline_risk_score": original_baseline.get("risk_score", 0.0),
         "is_single_point_of_failure": original_baseline.get("is_single_point_of_failure", False),
@@ -799,7 +902,7 @@ def generate_what_if_candidates(
         "target_component_id": target_component_id,
         "target_component_name": target_node.get("name", target_component_id),
         "action": action,
-        "source_environment": source_environment,
+        "source_environment": effective_env,
         "original_baseline": original_baseline,
         "candidate_count": len(candidate_results),
         "candidates": candidate_results,

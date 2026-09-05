@@ -66,6 +66,7 @@ def create_snapshot(
         
     state_payload = {
         "environment_id": environment_id,
+        "source_environment": sol_info.get("source_environment", "manual"),
         "components": serialized_comps,
         "dependencies": serialized_deps
     }
